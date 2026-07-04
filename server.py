@@ -96,7 +96,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
+    port = int(os.environ.get("PORT", "3000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"TZ map: http://0.0.0.0:{port}/", flush=True)
     print("Sync proxy: /api/sync/ -> mantledb.sh", flush=True)
