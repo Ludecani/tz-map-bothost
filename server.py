@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,17 +42,26 @@ class Handler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
         except urllib.error.HTTPError as e:
-            body = e.read()
+            err_body = e.read()
             self.send_response(e.code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(body or b"{}")
+            self.wfile.write(err_body or b"{}")
         except Exception as e:
             msg = json.dumps({"error": str(e)}).encode("utf-8")
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(msg)
+
+    def _webhook_ok(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
 
     def do_OPTIONS(self):
         if self.path.startswith("/api/sync/"):
@@ -70,6 +80,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok")
             return
+        if self.path in ("/", "/index.html"):
+            self.path = "/index.html"
         if self.path.startswith("/api/sync/rooms/"):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
             self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "GET")
@@ -77,6 +89,9 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        if self.path in ("/webhook", "/webhook/"):
+            self._webhook_ok()
+            return
         if self.path.startswith("/api/sync/rooms/"):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
             length = int(self.headers.get("Content-Length", 0))
@@ -95,9 +110,22 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_PUT()
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "3000"))
+def _serve(port):
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"TZ map: http://0.0.0.0:{port}/", flush=True)
-    print("Sync proxy: /api/sync/ -> mantledb.sh", flush=True)
+    print(f"Listening on 0.0.0.0:{port} (root={ROOT})", flush=True)
     server.serve_forever()
+
+
+if __name__ == "__main__":
+    primary = int(os.environ.get("PORT", "3000"))
+    ports = []
+    for p in (primary, 8080, 3000):
+        if p not in ports:
+            ports.append(p)
+    print(f"TZ map root: {ROOT}", flush=True)
+    print("Sync proxy: /api/sync/ -> mantledb.sh", flush=True)
+    for port in ports:
+        if port == primary:
+            continue
+        threading.Thread(target=_serve, args=(port,), daemon=True).start()
+    _serve(primary)
