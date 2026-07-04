@@ -5,7 +5,9 @@ import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-ROOT = os.path.join(os.path.dirname(__file__), "build")
+BASE = os.path.dirname(os.path.abspath(__file__))
+BUILD = os.path.join(BASE, "build")
+ROOT = BUILD if os.path.isfile(os.path.join(BUILD, "index.html")) else BASE
 MANTLE_BASE = "https://mantledb.sh/v2/tz-map-novgorod-sync"
 MANTLE_KEY = "1b2a1dbec46cd98d46c74d6267422454a94adb98daff00217ff14c3d3ae9f8f2"
 VIS_BASE = "https://mantledb.sh/v2/visibility/tz-map-novgorod-sync"
@@ -62,6 +64,12 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_OPTIONS()
 
     def do_GET(self):
+        if self.path in ("/health", "/health/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
         if self.path.startswith("/api/sync/rooms/"):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
             self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "GET")
