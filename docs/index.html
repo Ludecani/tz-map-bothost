@@ -2835,15 +2835,21 @@ const TZ_DOCS = {
 // Sovmestnaya sinhronizaciya otmetok (MantleDB)
 const MAP_SYNC_DIRECT = 'https://mantledb.sh/v2/tz-map-novgorod-sync';
 
+function syncHasLocalProxy() {
+  if (typeof location === 'undefined') return false;
+  const h = location.hostname;
+  return h.includes('bothost.') || h === '127.0.0.1' || h === 'localhost' || /^192\.168\./.test(h);
+}
+
 function syncBaseUrl() {
-  if (location.protocol === 'http:' || location.protocol === 'https:') {
+  if ((location.protocol === 'http:' || location.protocol === 'https:') && syncHasLocalProxy()) {
     return location.origin.replace(/\/$/, '') + '/api/sync';
   }
   return MAP_SYNC_DIRECT;
 }
 
 function syncUsesProxy() {
-  return typeof location !== 'undefined' && (location.protocol === 'http:' || location.protocol === 'https:');
+  return syncBaseUrl() !== MAP_SYNC_DIRECT;
 }
 
 const MAP_SYNC = {
