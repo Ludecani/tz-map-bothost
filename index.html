@@ -3189,9 +3189,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     let syncRoomPrepared = false;
     let syncPushInFlight = false;
     const dirtySyncIds = {};
-    const SYNC_POLL_MS = 5000;
+    const SYNC_POLL_MS = 3000;
     const SYNC_PUSH_DELAY_MS = 250;
-    const DIRTY_SYNC_MS = 45000;
+    const DIRTY_SYNC_MS = 12000;
     const SYNC_FETCH_MS = 15000;
     const SYNC_FETCH_RETRIES = 3;
 
@@ -3467,10 +3467,13 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     }
 
     function syncRoomUrl(room) {
+      let url;
       if (MAP_SYNC.provider === 'mantledb') {
-        return MAP_SYNC.baseUrl.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room);
+        url = MAP_SYNC.baseUrl.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room);
+      } else {
+        url = MAP_SYNC.databaseURL.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room) + '.json';
       }
-      return MAP_SYNC.databaseURL.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room) + '.json';
+      return url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
     }
 
     function syncWriteHeaders() {
@@ -3509,8 +3512,11 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       const fromInput = el && el.value ? el.value.trim() : '';
       const fromUrl = new URLSearchParams(location.search).get('room');
       const fromStore = localStorage.getItem(SYNC_ROOM_KEY) || '';
-      const fallback = (typeof MAP_SYNC !== 'undefined' && MAP_SYNC.defaultRoom) ? MAP_SYNC.defaultRoom : 'tz-map';
-      return fromInput || fromUrl || fromStore || fallback;
+      const fallback = (typeof MAP_SYNC !== 'undefined' && MAP_SYNC.defaultRoom) ? MAP_SYNC.defaultRoom : 'tz-map-novgorod';
+      let room = fromInput || fromUrl || fromStore || fallback;
+      room = room.replace(/[^\w\-]+/g, '-').slice(0, 48);
+      if (room === 'tz-map' || room === 'tz' || room === 'map' || !room) room = fallback;
+      return room;
     }
 
     function setSyncStatus(text, cls) {
@@ -3539,7 +3545,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           const local = completedMeta[id];
           const remoteAt = Number(remote.at) || 0;
           const localAt = local && local.at ? Number(local.at) : 0;
-          if (isDirtySync(id)) return;
+          if (isDirtySync(id) && remoteAt <= localAt) return;
           if (remoteAt < localAt) return;
 
           const remoteStatus = remoteWorkStatus(remote);
@@ -3577,7 +3583,10 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         const localSt = getWorkStatus(id);
         const remoteItem = remoteItems[id];
         const remoteSt = remoteItem ? remoteWorkStatus(remoteItem) : 'none';
+        const remoteAt = remoteItem ? (Number(remoteItem.at) || 0) : 0;
+        const dirtyAt = dirtySyncIds[id] || 0;
         if (localSt === remoteSt) clearDirtySync(id);
+        else if (remoteAt >= dirtyAt) clearDirtySync(id);
       });
     }
 
@@ -3585,8 +3594,13 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       const items = {};
       data.forEach(function (item) {
         const st = getWorkStatus(item.id);
-        if (st === 'none') return;
         const m = completedMeta[item.id];
+        if (st === 'none') {
+          if (m && m.at && isDirtySync(item.id)) {
+            items[item.id] = { status: 'none', done: false, by: m.by || getSyncName(), at: m.at };
+          }
+          return;
+        }
         items[item.id] = {
           status: st,
           done: st === 'done',
@@ -3617,6 +3631,10 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       });
       Object.keys(localPayload.items).forEach(function (id) {
         const local = localPayload.items[id];
+        if (local.status === 'none') {
+          delete mergedItems[id];
+          return;
+        }
         const cur = mergedItems[id];
         const localAt = Number(local.at) || 0;
         const curAt = cur ? Number(cur.at) || 0 : 0;
@@ -3677,7 +3695,8 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           const changed = applyCompletedFromRemote(remote.items);
           reconcileDirtyAfterRemote(remote.items);
           syncConnected = true;
-          setSyncStatus(changed ? 'обновлено сейчас' : 'синхронизация: онлайн', 'ok');
+          const n = Object.keys(remote.items).length;
+          setSyncStatus(changed ? 'обновлено сейчас' : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
           return true;
         })
         .catch(function () {
@@ -3734,7 +3753,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       prepareSyncRoom(syncRoom).then(function () {
         return pullSyncState();
       }).then(function () {
-        if (manual && hasLocalWorkMarks()) return pushSyncState();
+        if (hasLocalWorkMarks()) return pushSyncState();
       }).catch(function () {
         setSyncStatus(syncErrorStatus(), 'err');
       });
