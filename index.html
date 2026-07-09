@@ -3466,14 +3466,15 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return !!MAP_SYNC.databaseURL;
     }
 
-    function syncRoomUrl(room) {
+    function syncRoomUrl(room, write) {
       let url;
       if (MAP_SYNC.provider === 'mantledb') {
         url = MAP_SYNC.baseUrl.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room);
       } else {
         url = MAP_SYNC.databaseURL.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room) + '.json';
       }
-      return url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+      if (!write) url += (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+      return url;
     }
 
     function syncWriteHeaders() {
@@ -3657,7 +3658,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         .then(function (remote) {
           const payload = mergeSyncPayload(localPayload, remote);
           opts.body = JSON.stringify(payload);
-          return syncCloudFetch(syncRoomUrl(syncRoom), opts);
+          return syncCloudFetch(syncRoomUrl(syncRoom, true), opts);
         })
         .then(function (res) {
           if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -3680,7 +3681,15 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
-      return syncCloudFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers })
+      function readRemote() {
+        return syncFetch(syncRoomUrl(syncRoom), { cache: 'no-store' })
+          .then(function (res) {
+            if (res.ok || res.status === 404) return res;
+            if (!Object.keys(headers).length) throw new Error('HTTP ' + res.status);
+            return syncFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers });
+          });
+      }
+      return readRemote()
         .then(function (res) {
           if (res.status === 404) return null;
           if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -3753,7 +3762,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       prepareSyncRoom(syncRoom).then(function () {
         return pullSyncState();
       }).then(function () {
-        if (hasLocalWorkMarks()) return pushSyncState();
+        if (hasLocalWorkMarks()) {
+          pushSyncState().catch(function () {});
+        }
       }).catch(function () {
         setSyncStatus(syncErrorStatus(), 'err');
       });
