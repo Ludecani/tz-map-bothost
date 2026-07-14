@@ -2832,8 +2832,8 @@ const TZ_DOCS = {
 
 </script>
   <script>
-// Sovmestnaya sinhronizaciya otmetok (MantleDB)
-const MAP_SYNC_DIRECT = 'https://mantledb.sh/v2/tz-map-novgorod-sync';
+// Sovmestnaya sinhronizaciya otmetok (MantleDB) — open namespace (browser-writable)
+const MAP_SYNC_DIRECT = 'https://mantledb.sh/v2/tzmap-public';
 
 function syncHasLocalProxy() {
   if (typeof location === 'undefined') return false;
@@ -2857,7 +2857,7 @@ const MAP_SYNC = {
   provider: 'mantledb',
   baseUrl: syncBaseUrl(),
   directBaseUrl: MAP_SYNC_DIRECT,
-  mantleKey: '1b2a1dbec46cd98d46c74d6267422454a94adb98daff00217ff14c3d3ae9f8f2',
+  mantleKey: '',
   defaultRoom: 'tz-map-novgorod',
   usesProxy: syncUsesProxy()
 };
@@ -3192,8 +3192,8 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     const SYNC_POLL_MS = 3000;
     const SYNC_PUSH_DELAY_MS = 250;
     const DIRTY_SYNC_MS = 12000;
-    const SYNC_FETCH_MS = 15000;
-    const SYNC_FETCH_RETRIES = 3;
+    const SYNC_FETCH_MS = 8000;
+    const SYNC_FETCH_RETRIES = 2;
 
     function syncFetch(url, opts) {
       function attempt(n) {
@@ -3217,7 +3217,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       if (url.indexOf(proxy + '/visibility/') === 0) {
         return url.replace(
           proxy + '/visibility/',
-          'https://mantledb.sh/v2/visibility/tz-map-novgorod-sync/rooms/'
+          'https://mantledb.sh/v2/visibility/tzmap-public/rooms/'
         );
       }
       if (url.indexOf(proxy) === 0) {
@@ -3461,7 +3461,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     function syncConfigured() {
       if (typeof MAP_SYNC === 'undefined' || !MAP_SYNC.enabled) return false;
       if (MAP_SYNC.provider === 'mantledb') {
-        return !!(MAP_SYNC.baseUrl && (MAP_SYNC.usesProxy || MAP_SYNC.mantleKey));
+        return !!MAP_SYNC.baseUrl;
       }
       return !!MAP_SYNC.databaseURL;
     }
@@ -3492,6 +3492,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
 
     function ensureRoomPublic(room) {
       if (MAP_SYNC.provider !== 'mantledb') return Promise.resolve();
+      if (!MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) return Promise.resolve();
       const visUrl = MAP_SYNC.usesProxy
         ? MAP_SYNC.baseUrl.replace(/\/$/, '') + '/visibility/' + encodeURIComponent(room)
         : 'https://mantledb.sh/v2/visibility/' + mantleNamespace() + '/rooms/' + encodeURIComponent(room);

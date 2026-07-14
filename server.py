@@ -9,9 +9,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 BASE = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.join(BASE, "build")
 ROOT = BUILD if os.path.isfile(os.path.join(BUILD, "index.html")) else BASE
-MANTLE_BASE = "https://mantledb.sh/v2/tz-map-novgorod-sync"
-MANTLE_KEY = "1b2a1dbec46cd98d46c74d6267422454a94adb98daff00217ff14c3d3ae9f8f2"
-VIS_BASE = "https://mantledb.sh/v2/visibility/tz-map-novgorod-sync"
+MANTLE_BASE = "https://mantledb.sh/v2/tzmap-public"
+MANTLE_KEY = ""
+VIS_BASE = "https://mantledb.sh/v2/visibility/tzmap-public"
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -29,10 +29,11 @@ class Handler(SimpleHTTPRequestHandler):
     def _proxy(self, url, method, body=None):
         headers = {
             "Content-Type": "application/json",
-            "X-Mantle-Key": MANTLE_KEY,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json",
         }
+        if MANTLE_KEY:
+            headers["X-Mantle-Key"] = MANTLE_KEY
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
