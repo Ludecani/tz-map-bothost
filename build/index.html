@@ -3188,6 +3188,12 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     let syncConnected = false;
     let syncRoomPrepared = false;
     let syncPushInFlight = false;
+    let syncRequestChain = Promise.resolve();
+    function enqueueSyncRequest(fn) {
+      const run = syncRequestChain.then(fn, fn);
+      syncRequestChain = run.catch(function () {});
+      return run;
+    }
     const dirtySyncIds = {};
     const SYNC_POLL_MS = 3000;
     const SYNC_PUSH_DELAY_MS = 250;
@@ -3647,6 +3653,11 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
 
     function pushSyncState() {
       if (!syncConfigured() || !syncRoom || syncApplyingRemote) return Promise.resolve(false);
+      return enqueueSyncRequest(function () { return pushSyncStateNow(); });
+    }
+
+    function pushSyncStateNow() {
+      if (!syncConfigured() || !syncRoom || syncApplyingRemote) return Promise.resolve(false);
       const localPayload = buildSyncPayload();
       const opts = {
         method: MAP_SYNC.provider === 'mantledb' ? 'POST' : 'PUT',
@@ -3676,6 +3687,12 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     }
 
     function pullSyncState() {
+      if (!syncConfigured() || !syncRoom) return Promise.resolve(false);
+      if (syncPushInFlight) return Promise.resolve(false);
+      return enqueueSyncRequest(function () { return pullSyncStateNow(); });
+    }
+
+    function pullSyncStateNow() {
       if (!syncConfigured() || !syncRoom) return Promise.resolve(false);
       if (syncPushInFlight) return Promise.resolve(false);
       const headers = {};
@@ -3762,10 +3779,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       setSyncStatus('подключение…', 'warn');
       prepareSyncRoom(syncRoom).then(function () {
         return pullSyncState();
-      }).then(function () {
-        if (hasLocalWorkMarks()) {
-          pushSyncState().catch(function () {});
-        }
+      }).then(function (ok) {
+        if (ok) return;
+        if (hasLocalWorkMarks()) return pushSyncState();
       }).catch(function () {
         setSyncStatus(syncErrorStatus(), 'err');
       });
