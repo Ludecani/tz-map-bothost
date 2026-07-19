@@ -4615,7 +4615,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     map.createPane('markersPane');
     map.getPane('markersPane').style.zIndex = 650;
     coverageRenderer = L.canvas({ padding: 0.5, pane: 'coveragePane' });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', { maxZoom: 19, subdomains: 'abcd', attribution: '© OpenStreetMap © CARTO' }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
     coverageLayer.addTo(map);
 
     data.forEach(item => {
