@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />`r`n  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>Карта ТЗ</title>
@@ -3195,9 +3195,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return run;
     }
     const dirtySyncIds = {};
-    const SYNC_POLL_MS = 3000;
+    const SYNC_POLL_MS = 2500;
     const SYNC_PUSH_DELAY_MS = 250;
-    const DIRTY_SYNC_MS = 12000;
+    const DIRTY_SYNC_MS = 20000;
     const SYNC_FETCH_MS = 8000;
     const SYNC_FETCH_RETRIES = 2;
 
@@ -3545,16 +3545,17 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     function applyCompletedFromRemote(items) {
       if (!items || typeof items !== 'object') return false;
       const changedIds = [];
+      const remoteIds = {};
       syncApplyingRemote = true;
       try {
         Object.keys(items).forEach(function (id) {
           const remote = items[id];
           if (!remote) return;
+          remoteIds[id] = true;
           const local = completedMeta[id];
           const remoteAt = Number(remote.at) || 0;
           const localAt = local && local.at ? Number(local.at) : 0;
-          if (isDirtySync(id) && remoteAt <= localAt) return;
-          if (remoteAt < localAt) return;
+          if (isDirtySync(id) && remoteAt < localAt) return;
 
           const remoteStatus = remoteWorkStatus(remote);
           const localStatus = getWorkStatus(id);
@@ -3571,6 +3572,16 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
             return;
           }
           completedMeta[id] = { status: remoteStatus, by: remoteBy, at: remoteAt };
+          changedIds.push(id);
+        });
+        Object.keys(completedMeta).forEach(function (id) {
+          if (remoteIds[id]) return;
+          if (isDirtySync(id)) return;
+          if (getWorkStatus(id) === 'none') {
+            delete completedMeta[id];
+            return;
+          }
+          delete completedMeta[id];
           changedIds.push(id);
         });
         if (changedIds.length) {
@@ -3635,11 +3646,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     function mergeSyncPayload(localPayload, remote) {
       const mergedItems = Object.assign({}, (remote && remote.items) || {});
       Object.keys(dirtySyncIds).forEach(function (id) {
-        if (!localPayload.items[id]) delete mergedItems[id];
-      });
-      Object.keys(localPayload.items).forEach(function (id) {
+        if (!isDirtySync(id)) return;
         const local = localPayload.items[id];
-        if (local.status === 'none') {
+        if (!local || local.status === 'none') {
           delete mergedItems[id];
           return;
         }
@@ -4541,6 +4550,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
 
     updateStats();
     map.fitBounds(L.featureGroup([...markerMap.values()].map(v => v.marker)).getBounds().pad(0.08));
+    setTimeout(function () { try { map.invalidateSize(); } catch (e) {} }, 200);
 
     document.querySelectorAll('.district-filter').forEach(btn => {
       btn.addEventListener('click', () => {
