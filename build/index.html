@@ -3731,9 +3731,11 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         body: JSON.stringify(patch)
       }).then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        syncConnected = true;
-        setSyncStatus('сохранено, проверка…', 'ok');
-        return true;
+        return res.json().catch(function () { return {}; }).then(function () {
+          syncConnected = true;
+          setSyncStatus('сохранено, проверка…', 'ok');
+          return true;
+        });
       }).catch(function () {
         syncConnected = false;
         setSyncStatus('ошибка отправки — повторите', 'err');
@@ -3770,21 +3772,11 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           return res.json();
         })
         .then(function (doc) {
-          if (!doc) {
-            reconcileDirtyAfterRemote({});
-            if (!syncConnected) setSyncStatus('комната пуста — ждём коллег', 'warn');
+          if (doc == null || typeof doc !== 'object') {
+            setSyncStatus('нет связи с облаком — обновите страницу', 'err');
             return false;
           }
           const items = remoteDocToItems(doc);
-          if (!Object.keys(items).length) {
-            reconcileDirtyAfterRemote({});
-            if (!syncConnected) setSyncStatus('комната пуста — ждём коллег', 'warn');
-            // still clear local non-dirty against empty remote
-            const changedEmpty = applyCompletedFromRemote({});
-            syncConnected = true;
-            setSyncStatus(changedEmpty ? 'обновлено сейчас' : ('онлайн · 0 · ' + syncRoom), 'ok');
-            return true;
-          }
           const changed = applyCompletedFromRemote(items);
           reconcileDirtyAfterRemote(items);
           syncConnected = true;
