@@ -3702,48 +3702,88 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         syncConnected = true;
         return Promise.resolve(true);
       }
-      const patch = { updatedAt: Date.now() };
-      dirtyIds.forEach(function (id) {
-        const st = getWorkStatus(id);
-        const key = markKey(id);
-        if (st === 'none') {
-          patch[key] = null;
-          return;
-        }
-        const m = completedMeta[id];
-        patch[key] = {
-          status: st,
-          done: st === 'done',
-          by: (m && m.by) || getSyncName(),
-          at: (m && m.at) || Date.now(),
-          id: id
-        };
-      });
+      // MantleDB PATCH nulls the whole room — always rewrite via full POST.
       syncPushInFlight = true;
       setSyncStatus('сохранение…', 'warn');
-      const headers = { 'Content-Type': 'application/merge-patch+json' };
+      const headers = {};
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
-      return syncCloudFetch(syncRoomUrl(syncRoom, true), {
-        method: 'PATCH',
-        headers: headers,
-        body: JSON.stringify(patch)
-      }).then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json().catch(function () { return {}; }).then(function () {
-          syncConnected = true;
-          setSyncStatus('сохранено, проверка…', 'ok');
-          return true;
+      return syncCloudFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers })
+        .then(function (res) {
+          if (res.status === 404) return {};
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json().then(function (doc) {
+            if (doc == null || typeof doc !== 'object') return {};
+            return doc;
+          });
+        })
+        .then(function (doc) {
+          const next = Object.assign({}, doc);
+          if (next.items && typeof next.items === 'object') {
+            Object.keys(next.items).forEach(function (id) {
+              const it = next.items[id];
+              if (!it) return;
+              const key = markKey(id);
+              if (!next[key]) {
+                next[key] = {
+                  status: it.status,
+                  done: !!it.done || it.status === 'done',
+                  by: it.by,
+                  at: it.at,
+                  id: id
+                };
+              }
+            });
+            delete next.items;
+          }
+          dirtyIds.forEach(function (id) {
+            const st = getWorkStatus(id);
+            const key = markKey(id);
+            if (st === 'none') {
+              delete next[key];
+              return;
+            }
+            const m = completedMeta[id];
+            next[key] = {
+              status: st,
+              done: st === 'done',
+              by: (m && m.by) || getSyncName(),
+              at: (m && m.at) || Date.now(),
+              id: id
+            };
+          });
+          next.v = 3;
+          next.updatedAt = Date.now();
+          const markCount = Object.keys(next).filter(function (k) { return k.indexOf('m_') === 0; }).length;
+          const prevCount = Object.keys(doc || {}).filter(function (k) { return k.indexOf('m_') === 0; }).length;
+          if (prevCount > 5 && markCount < Math.max(1, Math.floor(prevCount * 0.5))) {
+            throw new Error('refusing destructive overwrite');
+          }
+          const writeHeaders = Object.assign({ 'Content-Type': 'application/json' }, headers);
+          return syncCloudFetch(syncRoomUrl(syncRoom, true), {
+            method: 'POST',
+            headers: writeHeaders,
+            body: JSON.stringify(next)
+          }).then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json().catch(function () { return {}; }).then(function () {
+              syncConnected = true;
+              setSyncStatus('сохранено, проверка…', 'ok');
+              return true;
+            });
+          });
+        })
+        .catch(function () {
+          syncConnected = false;
+          setSyncStatus('ошибка отправки — повтор', 'err');
+          return false;
+        })
+        .finally(function () {
+          syncPushInFlight = false;
         });
-      }).catch(function () {
-        syncConnected = false;
-        setSyncStatus('ошибка отправки — повторите', 'err');
-        return false;
-      }).finally(function () {
-        syncPushInFlight = false;
-      });
     }
+
     function pullSyncState() {
       if (!syncConfigured() || !syncRoom) return Promise.resolve(false);
       if (syncPushInFlight) return Promise.resolve(false);
