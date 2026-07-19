@@ -3198,7 +3198,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     const dirtySyncIds = {};
     const SYNC_POLL_MS = 2500;
     const SYNC_PUSH_DELAY_MS = 250;
-    const DIRTY_SYNC_MS = 20000;
+    const DIRTY_SYNC_MS = 300000;
     const SYNC_FETCH_MS = 25000;
     const SYNC_FETCH_RETRIES = 4;
 
@@ -3484,6 +3484,22 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return url;
     }
 
+    function syncMantleNs() {
+      const base = (MAP_SYNC.directBaseUrl || MAP_SYNC.baseUrl || '').replace(/\/$/, '');
+      const parts = base.split('/');
+      return parts[parts.length - 1] || 'tzmap-public';
+    }
+
+    function syncMarkUrl(room, key, write) {
+      let url = MAP_SYNC.baseUrl.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room) + '/' + key;
+      if (!write) url += (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
+      return url;
+    }
+
+    function syncExportUrl() {
+      return 'https://mantledb.sh/v2/export/' + syncMantleNs();
+    }
+
     function syncWriteHeaders() {
       const headers = { 'Content-Type': 'application/json' };
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
@@ -3703,97 +3719,83 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         syncConnected = true;
         return Promise.resolve(true);
       }
-      // MantleDB PATCH nulls the whole room — always rewrite via full POST.
+      // Per-mark tiny POSTs — full-room rewrite often resets/fails on MantleDB.
       syncPushInFlight = true;
       setSyncStatus('сохранение…', 'warn');
-      const headers = {};
+      const headers = syncWriteHeaders();
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
-      function loadDoc() {
-        return syncCloudFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers })
-          .then(function (res) {
-            if (res.status === 404) return {};
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.json().then(function (doc) {
-              if (doc == null || typeof doc !== 'object') throw new Error('empty remote');
-              syncLastRemoteDoc = doc;
-              return doc;
-            });
-          })
-          .catch(function () {
-            if (syncLastRemoteDoc && typeof syncLastRemoteDoc === 'object') {
-              return Object.assign({}, syncLastRemoteDoc);
+
+      function writeOne(id) {
+        const key = markKey(id);
+        const st = getWorkStatus(id);
+        const url = syncMarkUrl(syncRoom, key, true);
+        if (st === 'none') {
+          return syncCloudFetch(url, { method: 'DELETE', headers: headers }).then(function (res) {
+            if (res.ok || res.status === 404) {
+              clearDirtySync(id);
+              return true;
             }
-            throw new Error('no remote doc');
+            throw new Error('HTTP ' + res.status);
           });
+        }
+        const m = completedMeta[id];
+        const body = JSON.stringify({
+          status: st,
+          done: st === 'done',
+          by: (m && m.by) || getSyncName(),
+          at: (m && m.at) || Date.now(),
+          id: id
+        });
+        return syncCloudFetch(url, { method: 'POST', headers: headers, body: body }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          clearDirtySync(id);
+          return true;
+        });
       }
-      return loadDoc()
-        .then(function (doc) {
-          const next = Object.assign({}, doc);
-          if (next.items && typeof next.items === 'object') {
-            Object.keys(next.items).forEach(function (id) {
-              const it = next.items[id];
-              if (!it) return;
-              const key = markKey(id);
-              if (!next[key]) {
-                next[key] = {
-                  status: it.status,
-                  done: !!it.done || it.status === 'done',
-                  by: it.by,
-                  at: it.at,
-                  id: id
-                };
-              }
-            });
-            delete next.items;
-          }
-          dirtyIds.forEach(function (id) {
-            const st = getWorkStatus(id);
-            const key = markKey(id);
-            if (st === 'none') {
-              delete next[key];
+
+      function runQueue(ids, concurrency) {
+        let idx = 0;
+        let failed = 0;
+        let done = 0;
+        return new Promise(function (resolve) {
+          function next() {
+            if (idx >= ids.length && done >= ids.length) {
+              resolve(failed === 0);
               return;
             }
-            const m = completedMeta[id];
-            next[key] = {
-              status: st,
-              done: st === 'done',
-              by: (m && m.by) || getSyncName(),
-              at: (m && m.at) || Date.now(),
-              id: id
-            };
-          });
-          next.v = 3;
-          next.updatedAt = Date.now();
-          const markCount = Object.keys(next).filter(function (k) { return k.indexOf('m_') === 0; }).length;
-          const prevCount = Object.keys(doc || {}).filter(function (k) { return k.indexOf('m_') === 0; }).length;
-          if (prevCount > 5 && markCount < Math.max(1, Math.floor(prevCount * 0.5))) {
-            throw new Error('refusing destructive overwrite');
+            while (idx < ids.length && concurrency > 0) {
+              const id = ids[idx++];
+              concurrency--;
+              writeOne(id).then(function () {
+                done++;
+                concurrency++;
+                next();
+              }).catch(function () {
+                failed++;
+                done++;
+                concurrency++;
+                next();
+              });
+            }
           }
-          const writeHeaders = Object.assign({ 'Content-Type': 'application/json' }, headers);
-          return syncCloudFetch(syncRoomUrl(syncRoom, true), {
-            method: 'POST',
-            headers: writeHeaders,
-            body: JSON.stringify(next)
-          }).then(function (res) {
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.json().catch(function () { return {}; }).then(function () {
-              syncLastRemoteDoc = next;
-              syncConnected = true;
-              setSyncStatus('сохранено, проверка…', 'ok');
-              return true;
-            });
-          });
-        })
-        .catch(function () {
-          syncConnected = false;
-          setSyncStatus('ошибка отправки — повтор', 'err');
-          return false;
-        })
-        .finally(function () {
-          syncPushInFlight = false;
+          next();
         });
+      }
+
+      return runQueue(dirtyIds, 3).then(function (ok) {
+        syncConnected = ok;
+        if (ok) setSyncStatus('сохранено, проверка…', 'ok');
+        else setSyncStatus('ошибка отправки — повтор', 'err');
+        return ok;
+      }).catch(function () {
+        syncConnected = false;
+        setSyncStatus('ошибка отправки — повтор', 'err');
+        return false;
+      }).finally(function () {
+        syncPushInFlight = false;
+      });
     }
 
     function pullSyncState() {
@@ -3809,32 +3811,54 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
+      const prefix = 'rooms/' + syncRoom + '/';
+
+      function itemsFromExport(payload) {
+        const items = {};
+        const entries = (payload && payload.entries) || {};
+        Object.keys(entries).forEach(function (p) {
+          if (p === 'rooms/' + syncRoom) {
+            Object.assign(items, remoteDocToItems(entries[p]));
+            return;
+          }
+          if (p.indexOf(prefix) !== 0) return;
+          if (p.endsWith('/_meta')) return;
+          const it = entries[p];
+          if (!it || typeof it !== 'object' || !it.id) return;
+          if (it.status === 'none') return;
+          items[it.id] = { status: it.status, done: it.done, by: it.by, at: it.at };
+        });
+        return items;
+      }
+
       function readRemote() {
-        return syncFetch(syncRoomUrl(syncRoom), { cache: 'no-store' })
+        return syncFetch(syncExportUrl() + '?_=' + Date.now(), { cache: 'no-store', headers: headers })
           .then(function (res) {
-            if (res.ok || res.status === 404) return res;
-            if (!Object.keys(headers).length) throw new Error('HTTP ' + res.status);
-            return syncFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers });
+            if (res.ok) {
+              return res.json().then(function (payload) {
+                return itemsFromExport(payload);
+              });
+            }
+            // fallback: legacy single room doc
+            return syncFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers }).then(function (r2) {
+              if (r2.status === 404) return {};
+              if (!r2.ok) throw new Error('HTTP ' + r2.status);
+              return r2.json().then(function (doc) {
+                if (doc == null || typeof doc !== 'object') return {};
+                syncLastRemoteDoc = doc;
+                return remoteDocToItems(doc);
+              });
+            });
           });
       }
+
       return readRemote()
-        .then(function (res) {
-          if (res.status === 404) return null;
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        })
-        .then(function (doc) {
-          if (doc == null || typeof doc !== 'object') {
-            setSyncStatus('нет связи с облаком — обновите страницу', 'err');
-            return false;
-          }
-          syncLastRemoteDoc = doc;
-          const items = remoteDocToItems(doc);
+        .then(function (items) {
           const changed = applyCompletedFromRemote(items);
           reconcileDirtyAfterRemote(items);
           syncConnected = true;
           const n = Object.keys(items).length;
-          setSyncStatus(changed ? 'обновлено сейчас' : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
+          setSyncStatus(changed ? 'обновлено с сети' : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
           return true;
         })
         .catch(function () {

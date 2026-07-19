@@ -85,7 +85,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.path = "/index.html"
         if self.path.startswith("/api/sync/rooms/"):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
-            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "GET")
+            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='/')}", "GET")
             return
         super().do_GET()
 
@@ -97,7 +97,7 @@ class Handler(SimpleHTTPRequestHandler):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else None
-            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "POST", body)
+            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='/')}", "POST", body)
             return
         super().do_POST()
 
@@ -106,7 +106,14 @@ class Handler(SimpleHTTPRequestHandler):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else None
-            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "PATCH", body)
+            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='/')}", "PATCH", body)
+            return
+        self.send_error(501, "Unsupported method")
+
+    def do_DELETE(self):
+        if self.path.startswith("/api/sync/rooms/"):
+            room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
+            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='/')}", "DELETE", None)
             return
         self.send_error(501, "Unsupported method")
 
@@ -115,7 +122,7 @@ class Handler(SimpleHTTPRequestHandler):
             room = self.path.split("/api/sync/visibility/", 1)[1].split("?", 1)[0]
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else b'{"public_read":true}'
-            self._proxy(f"{VIS_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "PUT", body)
+            self._proxy(f"{VIS_BASE}/rooms/{urllib.parse.quote(room, safe='/')}", "PUT", body)
             return
         super().do_PUT()
 
