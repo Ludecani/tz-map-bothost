@@ -68,7 +68,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path.startswith("/api/sync/"):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Mantle-Key")
             self.end_headers()
             return
@@ -100,6 +100,15 @@ class Handler(SimpleHTTPRequestHandler):
             self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "POST", body)
             return
         super().do_POST()
+
+    def do_PATCH(self):
+        if self.path.startswith("/api/sync/rooms/"):
+            room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else None
+            self._proxy(f"{MANTLE_BASE}/rooms/{urllib.parse.quote(room, safe='')}", "PATCH", body)
+            return
+        self.send_error(501, "Unsupported method")
 
     def do_PUT(self):
         if self.path.startswith("/api/sync/visibility/"):

@@ -3609,6 +3609,34 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       });
     }
 
+    function markKey(id) {
+      try {
+        return 'm_' + btoa(unescape(encodeURIComponent(id))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      } catch (e) {
+        return 'm_' + String(id).length;
+      }
+    }
+
+    function remoteDocToItems(remote) {
+      const items = {};
+      if (!remote || typeof remote !== 'object') return items;
+      if (remote.items && typeof remote.items === 'object') {
+        Object.keys(remote.items).forEach(function (id) {
+          const it = remote.items[id];
+          if (it) items[id] = it;
+        });
+      }
+      Object.keys(remote).forEach(function (k) {
+        if (k.indexOf('m_') !== 0) return;
+        const it = remote[k];
+        if (!it || typeof it !== 'object') return;
+        const id = it.id || null;
+        if (!id) return;
+        items[id] = { status: it.status, done: it.done, by: it.by, at: it.at };
+      });
+      return items;
+    }
+
     function buildSyncPayload() {
       const items = {};
       data.forEach(function (item) {
@@ -3637,9 +3665,11 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       }
       return syncCloudFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers })
         .then(function (res) {
-          if (res.status === 404) return { v: 2, items: {} };
+          if (res.status === 404) return { v: 3, items: {} };
           if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
+          return res.json().then(function (doc) {
+            return { v: (doc && doc.v) || 3, items: remoteDocToItems(doc), updatedAt: doc && doc.updatedAt, _doc: doc };
+          });
         });
     }
 
@@ -3667,34 +3697,51 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
 
     function pushSyncStateNow() {
       if (!syncConfigured() || !syncRoom || syncApplyingRemote) return Promise.resolve(false);
-      const localPayload = buildSyncPayload();
-      const opts = {
-        method: MAP_SYNC.provider === 'mantledb' ? 'POST' : 'PUT',
-        headers: syncWriteHeaders()
-      };
+      const dirtyIds = Object.keys(dirtySyncIds).filter(function (id) { return isDirtySync(id); });
+      if (!dirtyIds.length) {
+        syncConnected = true;
+        return Promise.resolve(true);
+      }
+      const patch = { updatedAt: Date.now() };
+      dirtyIds.forEach(function (id) {
+        const st = getWorkStatus(id);
+        const key = markKey(id);
+        if (st === 'none') {
+          patch[key] = null;
+          return;
+        }
+        const m = completedMeta[id];
+        patch[key] = {
+          status: st,
+          done: st === 'done',
+          by: (m && m.by) || getSyncName(),
+          at: (m && m.at) || Date.now(),
+          id: id
+        };
+      });
       syncPushInFlight = true;
       setSyncStatus('сохранение…', 'warn');
-      return fetchRemoteSync()
-        .catch(function () { return { v: 2, items: {} }; })
-        .then(function (remote) {
-          const payload = mergeSyncPayload(localPayload, remote);
-          opts.body = JSON.stringify(payload);
-          return syncCloudFetch(syncRoomUrl(syncRoom, true), opts);
-        })
-        .then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          syncConnected = true;
-          setSyncStatus('сохранено, проверка…', 'ok');
-          return true;
-        }).catch(function () {
-          syncConnected = false;
-          setSyncStatus('ошибка отправки — повторите', 'err');
-          return false;
-        }).finally(function () {
-          syncPushInFlight = false;
-        });
+      const headers = { 'Content-Type': 'application/merge-patch+json' };
+      if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
+        headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
+      }
+      return syncCloudFetch(syncRoomUrl(syncRoom, true), {
+        method: 'PATCH',
+        headers: headers,
+        body: JSON.stringify(patch)
+      }).then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        syncConnected = true;
+        setSyncStatus('сохранено, проверка…', 'ok');
+        return true;
+      }).catch(function () {
+        syncConnected = false;
+        setSyncStatus('ошибка отправки — повторите', 'err');
+        return false;
+      }).finally(function () {
+        syncPushInFlight = false;
+      });
     }
-
     function pullSyncState() {
       if (!syncConfigured() || !syncRoom) return Promise.resolve(false);
       if (syncPushInFlight) return Promise.resolve(false);
@@ -3722,16 +3769,26 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           if (!res.ok) throw new Error('HTTP ' + res.status);
           return res.json();
         })
-        .then(function (remote) {
-          if (!remote || !remote.items) {
+        .then(function (doc) {
+          if (!doc) {
             reconcileDirtyAfterRemote({});
             if (!syncConnected) setSyncStatus('комната пуста — ждём коллег', 'warn');
             return false;
           }
-          const changed = applyCompletedFromRemote(remote.items);
-          reconcileDirtyAfterRemote(remote.items);
+          const items = remoteDocToItems(doc);
+          if (!Object.keys(items).length) {
+            reconcileDirtyAfterRemote({});
+            if (!syncConnected) setSyncStatus('комната пуста — ждём коллег', 'warn');
+            // still clear local non-dirty against empty remote
+            const changedEmpty = applyCompletedFromRemote({});
+            syncConnected = true;
+            setSyncStatus(changedEmpty ? 'обновлено сейчас' : ('онлайн · 0 · ' + syncRoom), 'ok');
+            return true;
+          }
+          const changed = applyCompletedFromRemote(items);
+          reconcileDirtyAfterRemote(items);
           syncConnected = true;
-          const n = Object.keys(remote.items).length;
+          const n = Object.keys(items).length;
           setSyncStatus(changed ? 'обновлено сейчас' : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
           return true;
         })
