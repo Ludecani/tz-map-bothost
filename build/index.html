@@ -3500,6 +3500,10 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return 'https://mantledb.sh/v2/export/' + syncMantleNs();
     }
 
+    function syncListUrl() {
+      return 'https://mantledb.sh/v2/list/' + syncMantleNs();
+    }
+
     function syncWriteHeaders() {
       const headers = { 'Content-Type': 'application/json' };
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
@@ -3812,47 +3816,88 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
       const prefix = 'rooms/' + syncRoom + '/';
+      const dataBase = (MAP_SYNC.directBaseUrl || MAP_SYNC.baseUrl).replace(/\/$/, '');
 
-      function itemsFromExport(payload) {
-        const items = {};
-        const entries = (payload && payload.entries) || {};
-        Object.keys(entries).forEach(function (p) {
-          if (p === 'rooms/' + syncRoom) {
-            Object.assign(items, remoteDocToItems(entries[p]));
-            return;
-          }
-          if (p.indexOf(prefix) !== 0) return;
-          if (p.endsWith('/_meta')) return;
-          const it = entries[p];
-          if (!it || typeof it !== 'object' || !it.id) return;
-          if (it.status === 'none') return;
-          items[it.id] = { status: it.status, done: it.done, by: it.by, at: it.at };
+      function fetchJson(url) {
+        return syncFetch(url, { cache: 'no-store', headers: headers }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
         });
-        return items;
       }
 
-      function readRemote() {
-        return syncFetch(syncExportUrl() + '?_=' + Date.now(), { cache: 'no-store', headers: headers })
-          .then(function (res) {
-            if (res.ok) {
-              return res.json().then(function (payload) {
-                return itemsFromExport(payload);
+      function mapLimit(items, limit, worker) {
+        return new Promise(function (resolve) {
+          const out = new Array(items.length);
+          let i = 0;
+          let active = 0;
+          let done = 0;
+          function kick() {
+            if (done >= items.length) {
+              resolve(out);
+              return;
+            }
+            while (active < limit && i < items.length) {
+              const idx = i++;
+              active++;
+              Promise.resolve(worker(items[idx], idx)).then(function (val) {
+                out[idx] = val;
+              }).catch(function () {
+                out[idx] = null;
+              }).then(function () {
+                active--;
+                done++;
+                kick();
               });
             }
-            // fallback: legacy single room doc
-            return syncFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers }).then(function (r2) {
-              if (r2.status === 404) return {};
-              if (!r2.ok) throw new Error('HTTP ' + r2.status);
-              return r2.json().then(function (doc) {
-                if (doc == null || typeof doc !== 'object') return {};
-                syncLastRemoteDoc = doc;
-                return remoteDocToItems(doc);
-              });
-            });
-          });
+          }
+          if (!items.length) resolve([]);
+          else kick();
+        });
       }
 
-      return readRemote()
+      function markDataUrl(entryPath) {
+        if (MAP_SYNC.usesProxy) {
+          return MAP_SYNC.baseUrl.replace(/\/$/, '') + '/' + entryPath;
+        }
+        return dataBase + '/' + entryPath;
+      }
+
+      function readViaList() {
+        return fetchJson(syncListUrl() + '?_=' + Date.now()).then(function (payload) {
+          const entries = (payload && payload.entries) || [];
+          const markPaths = entries
+            .map(function (e) { return e && e.path; })
+            .filter(function (p) {
+              return p && p.indexOf(prefix) === 0 && p.indexOf('/_meta') < 0;
+            });
+          return mapLimit(markPaths, 8, function (p) {
+            return fetchJson(markDataUrl(p) + '?_=' + Date.now()).catch(function () { return null; });
+          }).then(function (docs) {
+            const items = {};
+            docs.forEach(function (it) {
+              if (!it || typeof it !== 'object' || !it.id) return;
+              if (it.status === 'none') return;
+              items[it.id] = { status: it.status, done: it.done, by: it.by, at: it.at };
+            });
+            return items;
+          });
+        });
+      }
+
+      function readLegacyRoom() {
+        return fetchJson(syncRoomUrl(syncRoom)).then(function (doc) {
+          if (doc == null || typeof doc !== 'object') return {};
+          syncLastRemoteDoc = doc;
+          return remoteDocToItems(doc);
+        }).catch(function () { return {}; });
+      }
+
+      return readViaList()
+        .catch(function () { return {}; })
+        .then(function (items) {
+          if (items && Object.keys(items).length) return items;
+          return readLegacyRoom();
+        })
         .then(function (items) {
           const changed = applyCompletedFromRemote(items);
           reconcileDirtyAfterRemote(items);
