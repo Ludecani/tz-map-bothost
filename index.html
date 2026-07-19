@@ -3188,6 +3188,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     let syncConnected = false;
     let syncRoomPrepared = false;
     let syncPushInFlight = false;
+    let syncLastRemoteDoc = null;
     let syncRequestChain = Promise.resolve();
     function enqueueSyncRequest(fn) {
       const run = syncRequestChain.then(fn, fn);
@@ -3198,8 +3199,8 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     const SYNC_POLL_MS = 2500;
     const SYNC_PUSH_DELAY_MS = 250;
     const DIRTY_SYNC_MS = 20000;
-    const SYNC_FETCH_MS = 8000;
-    const SYNC_FETCH_RETRIES = 2;
+    const SYNC_FETCH_MS = 25000;
+    const SYNC_FETCH_RETRIES = 4;
 
     function syncFetch(url, opts) {
       function attempt(n) {
@@ -3709,15 +3710,25 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
-      return syncCloudFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers })
-        .then(function (res) {
-          if (res.status === 404) return {};
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json().then(function (doc) {
-            if (doc == null || typeof doc !== 'object') return {};
-            return doc;
+      function loadDoc() {
+        return syncCloudFetch(syncRoomUrl(syncRoom), { cache: 'no-store', headers: headers })
+          .then(function (res) {
+            if (res.status === 404) return {};
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json().then(function (doc) {
+              if (doc == null || typeof doc !== 'object') throw new Error('empty remote');
+              syncLastRemoteDoc = doc;
+              return doc;
+            });
+          })
+          .catch(function () {
+            if (syncLastRemoteDoc && typeof syncLastRemoteDoc === 'object') {
+              return Object.assign({}, syncLastRemoteDoc);
+            }
+            throw new Error('no remote doc');
           });
-        })
+      }
+      return loadDoc()
         .then(function (doc) {
           const next = Object.assign({}, doc);
           if (next.items && typeof next.items === 'object') {
@@ -3768,6 +3779,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           }).then(function (res) {
             if (!res.ok) throw new Error('HTTP ' + res.status);
             return res.json().catch(function () { return {}; }).then(function () {
+              syncLastRemoteDoc = next;
               syncConnected = true;
               setSyncStatus('сохранено, проверка…', 'ok');
               return true;
@@ -3816,6 +3828,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
             setSyncStatus('нет связи с облаком — обновите страницу', 'err');
             return false;
           }
+          syncLastRemoteDoc = doc;
           const items = remoteDocToItems(doc);
           const changed = applyCompletedFromRemote(items);
           reconcileDirtyAfterRemote(items);
@@ -3876,10 +3889,21 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       syncPollTimer = setInterval(pullSyncState, SYNC_POLL_MS);
       setSyncStatus('подключение…', 'warn');
       prepareSyncRoom(syncRoom).then(function () {
-        return pullSyncState();
+        function tryPull(n) {
+          return pullSyncState().then(function (ok) {
+            if (ok) return true;
+            if (n >= 4) return false;
+            setSyncStatus('подключение… повтор ' + n, 'warn');
+            return new Promise(function (resolve) { setTimeout(resolve, 800 * n); }).then(function () {
+              return tryPull(n + 1);
+            });
+          });
+        }
+        return tryPull(1);
       }).then(function (ok) {
         if (ok) return;
         if (hasLocalWorkMarks()) return pushSyncState();
+        setSyncStatus(syncErrorStatus(), 'err');
       }).catch(function () {
         setSyncStatus(syncErrorStatus(), 'err');
       });
