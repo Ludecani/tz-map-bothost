@@ -3192,6 +3192,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     let syncConnected = false;
     let syncRoomPrepared = false;
     let syncPushInFlight = false;
+    let syncPushAgain = false;
     let syncLastRemoteDoc = null;
     let syncRequestChain = Promise.resolve();
     function enqueueSyncRequest(fn) {
@@ -3207,6 +3208,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     const SYNC_FETCH_RETRIES = 2;
     const SYNC_PULL_FAST_MS = 4000;
     const SYNC_PULL_SLOW_MS = 9000;
+    const SYNC_SAVE_MS = 3500;
 
     function syncFetch(url, opts) {
       opts = opts || {};
@@ -3472,12 +3474,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       markDirtySync(id);
       saveCompletedMeta();
       setSyncStatus('сохранение…', 'warn');
-      // Push immediately; do not wait for debounce so a following pull cannot race as easily.
-      scheduleSyncPush();
-      pushSyncState();
       refreshMarker(id);
       updateStats();
       applyFilters(false);
+      // One fast cloud save (jsonblob). No debounce, no waiting for MantleDB.
+      pushSyncState();
     }
 
     function syncConfigured() {
@@ -3792,14 +3793,80 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: body,
-        timeout: SYNC_PULL_SLOW_MS,
-        retries: 2
+        timeout: SYNC_SAVE_MS,
+        retries: 1
       }).then(function () { return true; });
+    }
+
+    function pushMantleMarksBackground(ids) {
+      if (!ids || !ids.length) return;
+      const headers = syncWriteHeaders();
+      if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
+        headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
+      }
+      // Best-effort only — never block UI/save on MantleDB.
+      ids.slice(0, 12).forEach(function (id) {
+        const key = markKey(id);
+        const st = getWorkStatus(id);
+        const url = syncMarkUrl(syncRoom, key, true);
+        const m = completedMeta[id];
+        if (st === 'none') {
+          syncFetchOne(url, {
+            method: 'DELETE',
+            headers: headers,
+            timeout: 2500,
+            retries: 1
+          }).catch(function () {});
+          return;
+        }
+        const body = JSON.stringify({
+          status: st,
+          done: st === 'done',
+          by: (m && m.by) || getSyncName(),
+          at: (m && m.at) || Date.now(),
+          id: id
+        });
+        syncFetchOne(url, {
+          method: 'POST',
+          headers: headers,
+          body: body,
+          timeout: 2500,
+          retries: 1
+        }).catch(function () {});
+      });
+    }
+
+    function snapshotItemsFromLocal() {
+      const items = {};
+      data.forEach(function (item) {
+        const st = getWorkStatus(item.id);
+        if (st === 'none') return;
+        const meta = completedMeta[item.id] || {};
+        items[item.id] = {
+          status: st,
+          done: st === 'done',
+          by: meta.by || getSyncName(),
+          at: meta.at || Date.now()
+        };
+      });
+      return items;
+    }
+
+    function finishLocalCloudSave(dirtyIds) {
+      dirtyIds.forEach(function (id) { clearDirtySync(id); });
+      dirtyIds.forEach(function (id) {
+        if (getWorkStatus(id) === 'none') delete completedMeta[id];
+      });
+      saveCompletedMeta();
+      saveSyncSnapshot(syncRoom, snapshotItemsFromLocal());
+      syncConnected = true;
+      setSyncStatus('сохранено', 'ok');
     }
 
     function pushSyncState() {
       if (!syncConfigured() || !syncRoom || syncApplyingRemote) return Promise.resolve(false);
-      return enqueueSyncRequest(function () { return pushSyncStateNow(); });
+      // Do not queue behind slow pulls — saves must be fast.
+      return pushSyncStateNow();
     }
 
     function pushSyncStateNow() {
@@ -3811,114 +3878,31 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           return true;
         }).catch(function () { return true; });
       }
+      if (syncPushInFlight) {
+        // Coalesce rapid taps into one follow-up save.
+        syncPushAgain = true;
+        return Promise.resolve(false);
+      }
       syncPushInFlight = true;
       setSyncStatus('сохранение…', 'warn');
-      const headers = syncWriteHeaders();
-      if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
-        headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
-      }
 
-      function writeOne(id) {
-        const key = markKey(id);
-        const st = getWorkStatus(id);
-        const url = syncMarkUrl(syncRoom, key, true);
-        if (st === 'none') {
-          const m = completedMeta[id];
-          const body = JSON.stringify({
-            status: 'none',
-            done: false,
-            by: (m && m.by) || getSyncName(),
-            at: (m && m.at) || Date.now(),
-            id: id
-          });
-          return syncFetchOne(url, { method: 'POST', headers: headers, body: body, timeout: SYNC_PULL_SLOW_MS }).catch(function () {
-            return null;
-          }).then(function () {
-            return syncFetchOne(url, { method: 'DELETE', headers: headers, timeout: SYNC_PULL_SLOW_MS }).then(function () {
-              return true;
-            });
-          });
-        }
-        const m = completedMeta[id];
-        const body = JSON.stringify({
-          status: st,
-          done: st === 'done',
-          by: (m && m.by) || getSyncName(),
-          at: (m && m.at) || Date.now(),
-          id: id
-        });
-        return syncFetchOne(url, { method: 'POST', headers: headers, body: body, timeout: SYNC_PULL_SLOW_MS }).then(function () {
-          return true;
-        });
-      }
-
-      function runQueue(ids, concurrency) {
-        let idx = 0;
-        let failed = 0;
-        let done = 0;
-        return new Promise(function (resolve) {
-          function next() {
-            if (idx >= ids.length && done >= ids.length) {
-              resolve(failed === 0);
-              return;
-            }
-            while (idx < ids.length && concurrency > 0) {
-              const id = ids[idx++];
-              concurrency--;
-              writeOne(id).then(function () {
-                done++;
-                concurrency++;
-                next();
-              }).catch(function () {
-                failed++;
-                done++;
-                concurrency++;
-                next();
-              });
-            }
-          }
-          next();
-        });
-      }
-
-      const mantlePromise = runQueue(dirtyIds, 3).catch(function () { return false; });
-      const blobPromise = pushJsonblobSnapshot().catch(function () { return false; });
-
-      return Promise.all([mantlePromise, blobPromise]).then(function (pair) {
-        const mantleOk = !!pair[0];
-        const blobOk = !!pair[1];
-        const ok = mantleOk || blobOk;
+      return pushJsonblobSnapshot().then(function (blobOk) {
         if (blobOk) {
-          // Shared mirror is the source of truth for multi-user sync when Mantle is blocked.
-          dirtyIds.forEach(function (id) { clearDirtySync(id); });
-          dirtyIds.forEach(function (id) {
-            if (getWorkStatus(id) === 'none') delete completedMeta[id];
-          });
-          saveCompletedMeta();
-          saveSyncSnapshot(syncRoom, (function () {
-            const items = {};
-            data.forEach(function (item) {
-              const st = getWorkStatus(item.id);
-              if (st === 'none') return;
-              const meta = completedMeta[item.id] || {};
-              items[item.id] = { status: st, done: st === 'done', by: meta.by || getSyncName(), at: meta.at || Date.now() };
-            });
-            return items;
-          })());
-        } else if (mantleOk) {
-          dirtyIds.forEach(function (id) { clearDirtySync(id); });
+          finishLocalCloudSave(dirtyIds);
+          pushMantleMarksBackground(dirtyIds);
+          return true;
         }
-        syncConnected = ok;
-        if (blobOk) setSyncStatus('сохранено', 'ok');
-        else if (mantleOk) setSyncStatus('сохранено (mantle)', 'ok');
-        else setSyncStatus('не удалось сохранить в облако — повтор', 'err');
-        return ok;
+        setSyncStatus('не удалось сохранить — повтор', 'err');
+        return false;
       }).catch(function () {
-        syncConnected = false;
-        setSyncStatus('не удалось сохранить в облако — повтор', 'err');
+        setSyncStatus('не удалось сохранить — повтор', 'err');
         return false;
       }).finally(function () {
         syncPushInFlight = false;
+        if (syncPushAgain) {
+          syncPushAgain = false;
+          setTimeout(function () { pushSyncState(); }, 50);
+        }
       });
     }
 
@@ -4137,10 +4121,10 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       return pushSyncState().then(function (pushed) {
         if (!pushed) {
           if (syncPushTimer) clearTimeout(syncPushTimer);
-          syncPushTimer = setTimeout(syncPushThenPull, 2500);
+          syncPushTimer = setTimeout(syncPushThenPull, 1200);
           return false;
         }
-        return new Promise(function (resolve) { setTimeout(resolve, 400); }).then(function () {
+        return new Promise(function (resolve) { setTimeout(resolve, 300); }).then(function () {
           return pullSyncState();
         });
       });
@@ -4149,7 +4133,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function scheduleSyncPush() {
       if (!syncConfigured() || !syncRoom) return;
       if (syncPushTimer) clearTimeout(syncPushTimer);
-      syncPushTimer = setTimeout(syncPushThenPull, SYNC_PUSH_DELAY_MS);
+      syncPushTimer = setTimeout(function () { pushSyncState(); }, SYNC_PUSH_DELAY_MS);
     }
 
     function connectSync(manual) {
