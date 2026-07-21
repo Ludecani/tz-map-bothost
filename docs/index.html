@@ -3471,7 +3471,10 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       }
       markDirtySync(id);
       saveCompletedMeta();
+      setSyncStatus('сохранение…', 'warn');
+      // Push immediately; do not wait for debounce so a following pull cannot race as easily.
       scheduleSyncPush();
+      pushSyncState();
       refreshMarker(id);
       updateStats();
       applyFilters(false);
@@ -3643,7 +3646,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           const local = completedMeta[id];
           const remoteAt = Number(remote.at) || 0;
           const localAt = local && local.at ? Number(local.at) : 0;
-          if (isDirtySync(id) && remoteAt < localAt) return;
+          // Last-write-wins: never let an older snapshot (e.g. static Pages mirror) revert a newer local/cloud save.
+          if (localAt && remoteAt < localAt) return;
+          if (isDirtySync(id) && remoteAt <= localAt) return;
 
           const remoteStatus = remoteWorkStatus(remote);
           const localStatus = getWorkStatus(id);
@@ -3883,22 +3888,34 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         const mantleOk = !!pair[0];
         const blobOk = !!pair[1];
         const ok = mantleOk || blobOk;
-        if (ok) {
+        if (blobOk) {
+          // Shared mirror is the source of truth for multi-user sync when Mantle is blocked.
           dirtyIds.forEach(function (id) { clearDirtySync(id); });
-          if (!mantleOk) {
-            dirtyIds.forEach(function (id) {
-              if (getWorkStatus(id) === 'none') delete completedMeta[id];
+          dirtyIds.forEach(function (id) {
+            if (getWorkStatus(id) === 'none') delete completedMeta[id];
+          });
+          saveCompletedMeta();
+          saveSyncSnapshot(syncRoom, (function () {
+            const items = {};
+            data.forEach(function (item) {
+              const st = getWorkStatus(item.id);
+              if (st === 'none') return;
+              const meta = completedMeta[item.id] || {};
+              items[item.id] = { status: st, done: st === 'done', by: meta.by || getSyncName(), at: meta.at || Date.now() };
             });
-            saveCompletedMeta();
-          }
+            return items;
+          })());
+        } else if (mantleOk) {
+          dirtyIds.forEach(function (id) { clearDirtySync(id); });
         }
         syncConnected = ok;
-        if (ok) setSyncStatus('сохранено', 'ok');
-        else setSyncStatus('ошибка отправки — повтор', 'err');
+        if (blobOk) setSyncStatus('сохранено', 'ok');
+        else if (mantleOk) setSyncStatus('сохранено (mantle)', 'ok');
+        else setSyncStatus('не удалось сохранить в облако — повтор', 'err');
         return ok;
       }).catch(function () {
         syncConnected = false;
-        setSyncStatus('ошибка отправки — повтор', 'err');
+        setSyncStatus('не удалось сохранить в облако — повтор', 'err');
         return false;
       }).finally(function () {
         syncPushInFlight = false;
@@ -3994,14 +4011,20 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         }).length;
       }
 
-      function applyPullResult(result) {
+      function applyPullResult(result, opts) {
+        opts = opts || {};
         const items = (result && result.items) || {};
         const complete = !!(result && result.complete);
+        const prune = (opts.prune != null) ? !!opts.prune : complete;
+        if (!Object.keys(items).length && !prune) return false;
         if (!complete && !Object.keys(items).length) return false;
-        const changed = applyCompletedFromRemote(items, { pruneMissing: complete });
+        const changed = applyCompletedFromRemote(items, { pruneMissing: prune });
         reconcileDirtyAfterRemote(items);
         syncConnected = true;
-        saveSyncSnapshot(syncRoom, items);
+        // Only persist snapshots from live/complete sources so stale Pages data cannot become the cache.
+        if (complete || (result && result.source && result.source !== 'pages')) {
+          saveSyncSnapshot(syncRoom, items);
+        }
         const n = countActive(items);
         setSyncStatus(changed ? ('обновлено · ' + n) : ('онлайн · ' + n), 'ok');
         return true;
@@ -4055,7 +4078,8 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         return syncFetchOne(url, { timeout: SYNC_PULL_FAST_MS }).then(function (res) {
           return res.json();
         }).then(function (doc) {
-          return { items: itemsFromCompactDoc(doc), complete: true, source: 'pages' };
+          // Static deploy mirror can lag behind live saves — fill gaps only, never prune.
+          return { items: itemsFromCompactDoc(doc), complete: false, source: 'pages' };
         });
       }
 
@@ -4088,16 +4112,19 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         pRoom.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pExport.then(function (v) { if (!v) throw new Error('x'); return v; })
       ]).then(function (first) {
-        applyPullResult(first);
+        // Apply the fastest source immediately, but only prune for live/authoritative sources.
+        applyPullResult(first, { prune: !!(first && first.complete && first.source !== 'pages') });
         return Promise.all([pBlob, pPages, pRoom, pExport]).then(function (all) {
           const merged = {};
           let any = false;
+          let hasLive = false;
           all.forEach(function (r) {
             if (!r || !r.items) return;
             any = true;
+            if (r.source && r.source !== 'pages') hasLive = true;
             mergeItemMaps(merged, r.items);
           });
-          if (any) applyPullResult({ items: merged, complete: true });
+          if (any) applyPullResult({ items: merged, complete: hasLive }, { prune: hasLive });
           return true;
         });
       }).catch(function () {
