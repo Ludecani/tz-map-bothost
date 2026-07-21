@@ -2,7 +2,8 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />`r`n  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>Карта ТЗ</title>
@@ -4708,7 +4709,16 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     map.createPane('markersPane');
     map.getPane('markersPane').style.zIndex = 650;
     coverageRenderer = L.canvas({ padding: 0.5, pane: 'coveragePane' });
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+    const basemapOsm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
+    const basemapCarto = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', { maxZoom: 19, subdomains: 'abcd', attribution: '© OpenStreetMap © CARTO' });
+    let basemap = basemapOsm.addTo(map);
+    let basemapFallbackDone = false;
+    basemapOsm.on('tileerror', function () {
+      if (basemapFallbackDone) return;
+      basemapFallbackDone = true;
+      try { map.removeLayer(basemapOsm); } catch (e) {}
+      basemap = basemapCarto.addTo(map);
+    });
     coverageLayer.addTo(map);
 
     data.forEach(item => {
