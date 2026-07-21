@@ -3197,21 +3197,29 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return run;
     }
     const dirtySyncIds = {};
-    const SYNC_POLL_MS = 5000;
+    const SYNC_POLL_MS = 4000;
     const SYNC_PUSH_DELAY_MS = 250;
     const DIRTY_SYNC_MS = 300000;
-    const SYNC_FETCH_MS = 25000;
-    const SYNC_FETCH_RETRIES = 4;
+    const SYNC_FETCH_MS = 10000;
+    const SYNC_FETCH_RETRIES = 2;
+    const SYNC_PULL_ROOM_MS = 4000;
+    const SYNC_PULL_EXPORT_MS = 6000;
 
     function syncFetch(url, opts) {
+      opts = opts || {};
+      const timeoutMs = opts.timeout || SYNC_FETCH_MS;
+      const maxRetries = (opts.retries != null) ? opts.retries : SYNC_FETCH_RETRIES;
+      const fetchOpts = Object.assign({}, opts);
+      delete fetchOpts.timeout;
+      delete fetchOpts.retries;
       function attempt(n) {
         const ctrl = new AbortController();
-        const timer = setTimeout(function () { ctrl.abort(); }, SYNC_FETCH_MS);
-        return fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal }))
+        const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+        return fetch(url, Object.assign({}, fetchOpts, { signal: ctrl.signal }))
           .finally(function () { clearTimeout(timer); })
           .catch(function (err) {
-            if (n >= SYNC_FETCH_RETRIES) throw err;
-            return new Promise(function (resolve) { setTimeout(resolve, 400 * n); }).then(function () {
+            if (n >= maxRetries) throw err;
+            return new Promise(function (resolve) { setTimeout(resolve, 250 * n); }).then(function () {
               return attempt(n + 1);
             });
           });
@@ -3868,8 +3876,13 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       const prefix = roomPath + '/';
       const dataBase = (MAP_SYNC.directBaseUrl || MAP_SYNC.baseUrl).replace(/\/$/, '');
 
-      function fetchJson(url) {
-        return syncFetch(url, { cache: 'no-store', headers: headers }).then(function (res) {
+      function fetchJson(url, timeoutMs) {
+        return syncFetch(url, {
+          cache: 'no-store',
+          headers: headers,
+          timeout: timeoutMs || SYNC_FETCH_MS,
+          retries: 1
+        }).then(function (res) {
           if (!res.ok) throw new Error('HTTP ' + res.status);
           return res.json();
         });
@@ -3924,22 +3937,36 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         return items;
       }
 
-      function readViaExport() {
-        return fetchJson(syncExportUrl() + '?_=' + Date.now()).then(function (payload) {
-          return { items: itemsFromExport(payload), complete: true, source: 'export' };
-        });
+      function applyPullResult(result) {
+        const items = (result && result.items) || {};
+        const complete = !!(result && result.complete);
+        if (!complete && !Object.keys(items).length) return false;
+        const changed = applyCompletedFromRemote(items, { pruneMissing: complete });
+        reconcileDirtyAfterRemote(items);
+        syncConnected = true;
+        const n = Object.keys(items).filter(function (id) {
+          return remoteWorkStatus(items[id]) !== 'none';
+        }).length;
+        setSyncStatus(changed ? ('обновлено с сети · ' + n) : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
+        return true;
       }
 
       function readViaRoom() {
-        return fetchJson(syncRoomUrl(syncRoom)).then(function (doc) {
+        return fetchJson(syncRoomUrl(syncRoom), SYNC_PULL_ROOM_MS).then(function (doc) {
           if (doc == null || typeof doc !== 'object') return { items: {}, complete: false, source: 'room' };
           syncLastRemoteDoc = doc;
           return { items: remoteDocToItems(doc), complete: true, source: 'room' };
         });
       }
 
+      function readViaExport() {
+        return fetchJson(syncExportUrl() + '?_=' + Date.now(), SYNC_PULL_EXPORT_MS).then(function (payload) {
+          return { items: itemsFromExport(payload), complete: true, source: 'export' };
+        });
+      }
+
       function readViaList() {
-        return fetchJson(syncListUrl() + '?_=' + Date.now()).then(function (payload) {
+        return fetchJson(syncListUrl() + '?_=' + Date.now(), SYNC_PULL_ROOM_MS).then(function (payload) {
           const entries = (payload && payload.entries) || [];
           const markPaths = entries
             .map(function (e) { return e && e.path; })
@@ -3947,8 +3974,8 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
               return p && p.indexOf(prefix) === 0 && p.indexOf('/_meta') < 0;
             });
           if (!markPaths.length) return { items: {}, complete: true, source: 'list' };
-          return mapLimit(markPaths, 6, function (p) {
-            return fetchJson(markDataUrl(p) + '?_=' + Date.now()).then(function (doc) {
+          return mapLimit(markPaths, 8, function (p) {
+            return fetchJson(markDataUrl(p) + '?_=' + Date.now(), SYNC_PULL_ROOM_MS).then(function (doc) {
               return { ok: true, doc: doc };
             }).catch(function () {
               return { ok: false, doc: null };
@@ -3967,23 +3994,26 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         });
       }
 
-      return readViaExport()
-        .catch(function () { return readViaRoom(); })
-        .catch(function () { return readViaList(); })
-        .catch(function () { return { items: {}, complete: false, source: 'none' }; })
-        .then(function (result) {
-          const items = (result && result.items) || {};
-          const complete = !!(result && result.complete);
-          if (!complete && !Object.keys(items).length) throw new Error('empty sync pull');
-          const changed = applyCompletedFromRemote(items, { pruneMissing: complete });
-          reconcileDirtyAfterRemote(items);
-          syncConnected = true;
-          const n = Object.keys(items).filter(function (id) {
-            return remoteWorkStatus(items[id]) !== 'none';
-          }).length;
-          const src = (result && result.source) || '?';
-          setSyncStatus(changed ? ('обновлено с сети · ' + n) : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
-          return true;
+      // Fast path: room doc first (one request). Enrich from export in background.
+      const exportPromise = readViaExport().catch(function () { return null; });
+
+      return readViaRoom()
+        .catch(function () { return null; })
+        .then(function (roomResult) {
+          if (roomResult && applyPullResult(roomResult)) {
+            exportPromise.then(function (exp) {
+              if (!exp) return;
+              applyPullResult(exp);
+            });
+            return true;
+          }
+          return exportPromise.then(function (exp) {
+            if (exp && applyPullResult(exp)) return true;
+            return readViaList().then(function (listResult) {
+              if (!applyPullResult(listResult)) throw new Error('empty sync pull');
+              return true;
+            });
+          });
         })
         .catch(function () {
           syncConnected = false;
@@ -4040,9 +4070,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         function tryPull(n) {
           return pullSyncState().then(function (ok) {
             if (ok) return true;
-            if (n >= 4) return false;
-            setSyncStatus('подключение… повтор ' + n, 'warn');
-            return new Promise(function (resolve) { setTimeout(resolve, 800 * n); }).then(function () {
+            if (n >= 2) return false;
+            setSyncStatus('подключение… повтор', 'warn');
+            return new Promise(function (resolve) { setTimeout(resolve, 400); }).then(function () {
               return tryPull(n + 1);
             });
           });
