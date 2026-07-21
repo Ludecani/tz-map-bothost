@@ -3197,7 +3197,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return run;
     }
     const dirtySyncIds = {};
-    const SYNC_POLL_MS = 2500;
+    const SYNC_POLL_MS = 5000;
     const SYNC_PUSH_DELAY_MS = 250;
     const DIRTY_SYNC_MS = 300000;
     const SYNC_FETCH_MS = 25000;
@@ -3564,8 +3564,42 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       return '<div class="done-meta">' + label + ': ' + escapeHtml(m.by) + (when ? ' · ' + escapeHtml(when) : '') + '</div>';
     }
 
-    function applyCompletedFromRemote(items) {
+    function resolveSyncId(remoteId) {
+      if (!remoteId) return null;
+      for (let i = 0; i < data.length; i++) {
+        if (data[i].id === remoteId) return remoteId;
+      }
+      // Repair corrupted UTF-8 replacement chars in stored ids.
+      const parts = String(remoteId).split('|');
+      if (parts.length < 2) return remoteId;
+      const district = parts[0];
+      const idx = parts[parts.length - 1];
+      for (let i = 0; i < data.length; i++) {
+        const p = data[i].id.split('|');
+        if (p[p.length - 1] === idx && p[0] === district) return data[i].id;
+      }
+      return remoteId;
+    }
+
+    function mergeRemoteItem(items, rawId, it) {
+      if (!it || typeof it !== 'object') return;
+      const id = resolveSyncId(rawId || it.id);
+      if (!id) return;
+      if (it.status === 'none') {
+        items[id] = { status: 'none', done: false, by: it.by || '', at: Number(it.at) || 0 };
+        return;
+      }
+      const status = remoteWorkStatus(it);
+      if (status === 'none') return;
+      const next = { status: status, done: status === 'done', by: it.by || '', at: Number(it.at) || 0 };
+      const prev = items[id];
+      if (!prev || next.at >= (Number(prev.at) || 0)) items[id] = next;
+    }
+
+    function applyCompletedFromRemote(items, opts) {
       if (!items || typeof items !== 'object') return false;
+      opts = opts || {};
+      const pruneMissing = !!opts.pruneMissing;
       const changedIds = [];
       const remoteIds = {};
       syncApplyingRemote = true;
@@ -3596,16 +3630,19 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           completedMeta[id] = { status: remoteStatus, by: remoteBy, at: remoteAt };
           changedIds.push(id);
         });
-        Object.keys(completedMeta).forEach(function (id) {
-          if (remoteIds[id]) return;
-          if (isDirtySync(id)) return;
-          if (getWorkStatus(id) === 'none') {
+        // Only prune when the remote snapshot is complete. Partial pulls must not wipe statuses.
+        if (pruneMissing) {
+          Object.keys(completedMeta).forEach(function (id) {
+            if (remoteIds[id]) return;
+            if (isDirtySync(id)) return;
+            if (getWorkStatus(id) === 'none') {
+              delete completedMeta[id];
+              return;
+            }
             delete completedMeta[id];
-            return;
-          }
-          delete completedMeta[id];
-          changedIds.push(id);
-        });
+            changedIds.push(id);
+          });
+        }
         if (changedIds.length) {
           saveCompletedMeta();
           changedIds.forEach(function (id) { refreshMarker(id); });
@@ -3644,17 +3681,14 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       if (!remote || typeof remote !== 'object') return items;
       if (remote.items && typeof remote.items === 'object') {
         Object.keys(remote.items).forEach(function (id) {
-          const it = remote.items[id];
-          if (it) items[id] = it;
+          mergeRemoteItem(items, id, remote.items[id]);
         });
       }
       Object.keys(remote).forEach(function (k) {
         if (k.indexOf('m_') !== 0) return;
         const it = remote[k];
         if (!it || typeof it !== 'object') return;
-        const id = it.id || null;
-        if (!id) return;
-        items[id] = { status: it.status, done: it.done, by: it.by, at: it.at };
+        mergeRemoteItem(items, it.id, it);
       });
       return items;
     }
@@ -3737,12 +3771,26 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         const st = getWorkStatus(id);
         const url = syncMarkUrl(syncRoom, key, true);
         if (st === 'none') {
-          return syncCloudFetch(url, { method: 'DELETE', headers: headers }).then(function (res) {
-            if (res.ok || res.status === 404) {
-              clearDirtySync(id);
-              return true;
-            }
-            throw new Error('HTTP ' + res.status);
+          // Tombstone first so other clients see the clear even if DELETE is delayed.
+          const m = completedMeta[id];
+          const body = JSON.stringify({
+            status: 'none',
+            done: false,
+            by: (m && m.by) || getSyncName(),
+            at: (m && m.at) || Date.now(),
+            id: id
+          });
+          return syncCloudFetch(url, { method: 'POST', headers: headers, body: body }).then(function (res) {
+            if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
+            return syncCloudFetch(url, { method: 'DELETE', headers: headers }).then(function (res2) {
+              if (res2.ok || res2.status === 404) {
+                clearDirtySync(id);
+                delete completedMeta[id];
+                saveCompletedMeta();
+                return true;
+              }
+              throw new Error('HTTP ' + res2.status);
+            });
           });
         }
         const m = completedMeta[id];
@@ -3816,7 +3864,8 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       if (MAP_SYNC.provider === 'mantledb' && MAP_SYNC.mantleKey && !MAP_SYNC.usesProxy) {
         headers['X-Mantle-Key'] = MAP_SYNC.mantleKey;
       }
-      const prefix = 'rooms/' + syncRoom + '/';
+      const roomPath = 'rooms/' + syncRoom;
+      const prefix = roomPath + '/';
       const dataBase = (MAP_SYNC.directBaseUrl || MAP_SYNC.baseUrl).replace(/\/$/, '');
 
       function fetchJson(url) {
@@ -3863,6 +3912,32 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
         return dataBase + '/' + entryPath;
       }
 
+      function itemsFromExport(payload) {
+        const items = {};
+        const entries = (payload && payload.entries) || {};
+        if (entries[roomPath]) Object.assign(items, remoteDocToItems(entries[roomPath]));
+        Object.keys(entries).forEach(function (p) {
+          if (p.indexOf(prefix) !== 0) return;
+          if (p.indexOf('/_meta') >= 0) return;
+          mergeRemoteItem(items, null, entries[p]);
+        });
+        return items;
+      }
+
+      function readViaExport() {
+        return fetchJson(syncExportUrl() + '?_=' + Date.now()).then(function (payload) {
+          return { items: itemsFromExport(payload), complete: true, source: 'export' };
+        });
+      }
+
+      function readViaRoom() {
+        return fetchJson(syncRoomUrl(syncRoom)).then(function (doc) {
+          if (doc == null || typeof doc !== 'object') return { items: {}, complete: false, source: 'room' };
+          syncLastRemoteDoc = doc;
+          return { items: remoteDocToItems(doc), complete: true, source: 'room' };
+        });
+      }
+
       function readViaList() {
         return fetchJson(syncListUrl() + '?_=' + Date.now()).then(function (payload) {
           const entries = (payload && payload.entries) || [];
@@ -3871,40 +3946,43 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
             .filter(function (p) {
               return p && p.indexOf(prefix) === 0 && p.indexOf('/_meta') < 0;
             });
-          return mapLimit(markPaths, 8, function (p) {
-            return fetchJson(markDataUrl(p) + '?_=' + Date.now()).catch(function () { return null; });
-          }).then(function (docs) {
-            const items = {};
-            docs.forEach(function (it) {
-              if (!it || typeof it !== 'object' || !it.id) return;
-              if (it.status === 'none') return;
-              items[it.id] = { status: it.status, done: it.done, by: it.by, at: it.at };
+          if (!markPaths.length) return { items: {}, complete: true, source: 'list' };
+          return mapLimit(markPaths, 6, function (p) {
+            return fetchJson(markDataUrl(p) + '?_=' + Date.now()).then(function (doc) {
+              return { ok: true, doc: doc };
+            }).catch(function () {
+              return { ok: false, doc: null };
             });
-            return items;
+          }).then(function (rows) {
+            const items = {};
+            let ok = 0;
+            rows.forEach(function (row) {
+              if (!row || !row.ok) return;
+              ok++;
+              mergeRemoteItem(items, null, row.doc);
+            });
+            const complete = ok >= markPaths.length * 0.9;
+            return { items: items, complete: complete, source: 'list' };
           });
         });
       }
 
-      function readLegacyRoom() {
-        return fetchJson(syncRoomUrl(syncRoom)).then(function (doc) {
-          if (doc == null || typeof doc !== 'object') return {};
-          syncLastRemoteDoc = doc;
-          return remoteDocToItems(doc);
-        }).catch(function () { return {}; });
-      }
-
-      return readViaList()
-        .catch(function () { return {}; })
-        .then(function (items) {
-          if (items && Object.keys(items).length) return items;
-          return readLegacyRoom();
-        })
-        .then(function (items) {
-          const changed = applyCompletedFromRemote(items);
+      return readViaExport()
+        .catch(function () { return readViaRoom(); })
+        .catch(function () { return readViaList(); })
+        .catch(function () { return { items: {}, complete: false, source: 'none' }; })
+        .then(function (result) {
+          const items = (result && result.items) || {};
+          const complete = !!(result && result.complete);
+          if (!complete && !Object.keys(items).length) throw new Error('empty sync pull');
+          const changed = applyCompletedFromRemote(items, { pruneMissing: complete });
           reconcileDirtyAfterRemote(items);
           syncConnected = true;
-          const n = Object.keys(items).length;
-          setSyncStatus(changed ? 'обновлено с сети' : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
+          const n = Object.keys(items).filter(function (id) {
+            return remoteWorkStatus(items[id]) !== 'none';
+          }).length;
+          const src = (result && result.source) || '?';
+          setSyncStatus(changed ? ('обновлено с сети · ' + n) : ('онлайн · ' + n + ' · ' + syncRoom), 'ok');
           return true;
         })
         .catch(function () {
