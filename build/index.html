@@ -3199,13 +3199,14 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
       return run;
     }
     const dirtySyncIds = {};
-    const SYNC_POLL_MS = 8000;
+    const SYNC_POLL_MS = 6000;
     const SYNC_PUSH_DELAY_MS = 250;
     const DIRTY_SYNC_MS = 300000;
-    const SYNC_FETCH_MS = 8000;
+    const SYNC_FETCH_MS = 12000;
     const SYNC_FETCH_RETRIES = 2;
-    const SYNC_PULL_ROOM_MS = 2000;
-    const SYNC_PULL_EXPORT_MS = 2000;
+    const SYNC_PULL_ROOM_MS = 8000;
+    const SYNC_PULL_EXPORT_MS = 8000;
+    const SYNC_PULL_PROXY_MS = 10000;
 
     function syncFetch(url, opts) {
       opts = opts || {};
@@ -3888,6 +3889,43 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
       return enqueueSyncRequest(function () { return pullSyncStateNow(); });
     }
 
+    function corsProxyUrl(url) {
+      return 'https://corsproxy.io/?' + encodeURIComponent(url);
+    }
+
+    function syncFetchCloud(url, opts) {
+      opts = opts || {};
+      const timeout = opts.timeout || SYNC_FETCH_MS;
+      const allowProxy = opts.allowProxy !== false;
+      const attempts = [url];
+      if (allowProxy) attempts.push(corsProxyUrl(url));
+      // Race mirrors in parallel: if direct is blocked/hung, proxy can still win quickly.
+      return new Promise(function (resolve, reject) {
+        let left = attempts.length;
+        let done = false;
+        attempts.forEach(function (u) {
+          syncFetch(u, {
+            method: opts.method,
+            headers: opts.headers,
+            body: opts.body,
+            cache: opts.cache || 'no-store',
+            timeout: timeout,
+            retries: (opts.retries != null) ? opts.retries : 1
+          }).then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res;
+          }).then(function (res) {
+            if (done) return;
+            done = true;
+            resolve(res);
+          }).catch(function () {
+            left -= 1;
+            if (!done && left <= 0) reject(new Error('all mirrors failed'));
+          });
+        });
+      });
+    }
+
     function pullSyncStateNow() {
       if (!syncConfigured() || !syncRoom) return Promise.resolve(false);
       if (syncPushInFlight) return Promise.resolve(false);
@@ -3898,16 +3936,14 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
       const roomPath = 'rooms/' + syncRoom;
       const prefix = roomPath + '/';
 
-      function fetchJson(url, timeoutMs) {
-        return syncFetch(url, {
-          cache: 'no-store',
+      function fetchJson(url, timeoutMs, allowProxy) {
+        return syncFetchCloud(url, {
           headers: headers,
           timeout: timeoutMs || SYNC_PULL_ROOM_MS,
-          retries: 1
-        }).then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        });
+          retries: 1,
+          allowProxy: allowProxy !== false,
+          cache: 'no-store'
+        }).then(function (res) { return res.json(); });
       }
 
       function itemsFromExport(payload) {
@@ -3941,16 +3977,16 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
         return true;
       }
 
-      function readViaRoom() {
-        return fetchJson(syncRoomUrl(syncRoom), SYNC_PULL_ROOM_MS).then(function (doc) {
+      function readViaRoom(timeoutMs) {
+        return fetchJson(syncRoomUrl(syncRoom), timeoutMs || SYNC_PULL_ROOM_MS, true).then(function (doc) {
           if (doc == null || typeof doc !== 'object') throw new Error('bad room');
           syncLastRemoteDoc = doc;
           return { items: remoteDocToItems(doc), complete: true, source: 'room' };
         });
       }
 
-      function readViaExport() {
-        return fetchJson(syncExportUrl() + '?_=' + Date.now(), SYNC_PULL_EXPORT_MS).then(function (payload) {
+      function readViaExport(timeoutMs) {
+        return fetchJson(syncExportUrl() + '?_=' + Date.now(), timeoutMs || SYNC_PULL_EXPORT_MS, true).then(function (payload) {
           return { items: itemsFromExport(payload), complete: true, source: 'export' };
         });
       }
@@ -3976,16 +4012,23 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
         });
       }
 
-      // Race room vs export (2s each). Never block connect on list/N+1 GETs.
-      return firstSuccess([readViaRoom(), readViaExport()])
-        .then(function (result) {
+      // Parallel: room + export (each tries direct then corsproxy).
+      return firstSuccess([
+        readViaRoom(SYNC_PULL_ROOM_MS),
+        readViaExport(SYNC_PULL_EXPORT_MS)
+      ]).then(function (result) {
+        if (!applyPullResult(result)) throw new Error('empty sync pull');
+        return true;
+      }).catch(function () {
+        // Last resort: room via proxy with longer timeout only.
+        return readViaRoom(SYNC_PULL_PROXY_MS).then(function (result) {
           if (!applyPullResult(result)) throw new Error('empty sync pull');
           return true;
-        })
-        .catch(function () {
-          syncConnected = false;
-          return false;
         });
+      }).catch(function () {
+        syncConnected = false;
+        return false;
+      });
     }
 
     function syncPushThenPull() {
@@ -4045,8 +4088,7 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
         const n = Object.keys(snap).filter(function (id) {
           return remoteWorkStatus(snap[id]) !== 'none';
         }).length;
-        setSyncStatus('готово · ' + n + ' · обновление…', 'warn');
-        // Paint markers as soon as they exist / finish creating.
+        setSyncStatus('на карте · ' + n + ' · связь…', 'warn');
         setTimeout(function () {
           Object.keys(snap).forEach(function (id) { try { refreshMarker(id); } catch (e) {} });
           try { updateStats(); applyFilters(false); } catch (e) {}
@@ -4055,29 +4097,34 @@ const SYNC_BOOTSTRAP = {"room":"tz-map-novgorod","at":1784671423529,"items":{"Н
         setSyncStatus('подключение…', 'warn');
       }
 
-      prepareSyncRoom(syncRoom).then(function () {
-        // Direct pull — do not wait on the request queue for first connect.
-        return pullSyncStateNow();
-      }).then(function (ok) {
+      function startPolling() {
         if (!syncPollTimer) {
           syncPollTimer = setInterval(pullSyncState, SYNC_POLL_MS);
         }
+      }
+
+      prepareSyncRoom(syncRoom).then(function () {
+        return pullSyncStateNow();
+      }).then(function (ok) {
+        startPolling();
         if (ok) return;
         if (snap) {
-          setSyncStatus('кэш · нет сети · повтор в фоне', 'warn');
+          setSyncStatus('на карте · обновление в фоне', 'warn');
+          setTimeout(function () { pullSyncState(); }, 2500);
           return;
         }
         if (hasLocalWorkMarks()) return pushSyncState();
-        setSyncStatus(syncErrorStatus(), 'err');
+        setSyncStatus('нет связи с облаком — повторю сам', 'warn');
+        setTimeout(function () { pullSyncState(); }, 2500);
       }).catch(function () {
-        if (!syncPollTimer) {
-          syncPollTimer = setInterval(pullSyncState, SYNC_POLL_MS);
-        }
+        startPolling();
         if (snap) {
-          setSyncStatus('кэш · нет сети · повтор в фоне', 'warn');
+          setSyncStatus('на карте · обновление в фоне', 'warn');
+          setTimeout(function () { pullSyncState(); }, 2500);
           return;
         }
-        setSyncStatus(syncErrorStatus(), 'err');
+        setSyncStatus('нет связи с облаком — повторю сам', 'warn');
+        setTimeout(function () { pullSyncState(); }, 2500);
       });
     }
 
