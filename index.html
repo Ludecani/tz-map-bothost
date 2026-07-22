@@ -3603,6 +3603,15 @@ function syncUsesProxy() {
   return syncBaseUrl() !== MAP_SYNC_DIRECT;
 }
 
+function bothostStateUrl() {
+  if (!syncHasLocalProxy()) return '';
+  try {
+    return location.origin.replace(/\/$/, '') + '/api/sync/state';
+  } catch (e) {
+    return '';
+  }
+}
+
 const MAP_SYNC = {
   enabled: true,
   provider: 'mantledb',
@@ -4747,6 +4756,48 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       return attempt(1).catch(function () { return false; });
     }
 
+    function pushBothostStateSnapshot() {
+      const url = typeof bothostStateUrl === 'function' ? bothostStateUrl() : '';
+      if (!url) return Promise.resolve(false);
+      const localDoc = buildCompactDoc();
+      const maxAttempts = 5;
+
+      function attempt(n) {
+        return syncFetch(url + '?_=' + Date.now(), {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          cache: 'no-store',
+          timeout: SYNC_SAVE_MS,
+          retries: 1
+        }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function (remoteDoc) {
+          // Server merges LWW; send local marks. Empty remote is ok (first write).
+          const remote = (remoteDoc && typeof remoteDoc === 'object') ? remoteDoc : { v: 1, r: syncRoom, t: 0, m: {} };
+          const merged = mergeCompactDocs(remote, localDoc);
+          return syncFetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(merged),
+            cache: 'no-store',
+            timeout: SYNC_SAVE_MS,
+            retries: 0
+          }).then(function (putRes) {
+            if (!putRes.ok) {
+              if (n >= maxAttempts) throw new Error('HTTP ' + putRes.status);
+              return new Promise(function (resolve) {
+                setTimeout(resolve, 60 + Math.floor(Math.random() * 80) * n);
+              }).then(function () { return attempt(n + 1); });
+            }
+            return true;
+          });
+        });
+      }
+
+      return attempt(1).catch(function () { return false; });
+    }
+
     function pushMantleRoomSnapshot() {
       // Read-merge-write: a blind full-room POST would wipe marks other clients still hold only remotely.
       try {
@@ -4923,16 +4974,18 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       rememberOutboxIds(allIds);
       setSyncStatus('сохранение…', 'warn');
 
-      // Dual channel: jsonblob preferred, Mantle is a full fallback when blob is blocked/unreachable.
+      // Channels: bothost file store (RU), jsonblob, Mantle room/marks.
+      const bothostP = pushBothostStateSnapshot().catch(function () { return false; });
       const blobP = pushJsonblobSnapshot().catch(function () { return false; });
       const roomP = pushMantleRoomSnapshot().catch(function () { return false; });
       const marksP = pushMantleMarksBackground(allIds).catch(function () { return false; });
 
-      return Promise.all([blobP, roomP, marksP]).then(function (results) {
-        const blobOk = !!results[0];
-        const roomOk = !!results[1];
-        const marksOk = !!results[2];
-        if (blobOk || roomOk || marksOk) {
+      return Promise.all([bothostP, blobP, roomP, marksP]).then(function (results) {
+        const bothostOk = !!results[0];
+        const blobOk = !!results[1];
+        const roomOk = !!results[2];
+        const marksOk = !!results[3];
+        if (bothostOk || blobOk || roomOk || marksOk) {
           finishLocalCloudSave(allIds);
           if (!blobOk) {
             // Keep trying jsonblob in background so peers that only read blob still catch up later.
@@ -4942,14 +4995,22 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           }
           return true;
         }
+        const onBothost = typeof syncHasLocalProxy === 'function' && syncHasLocalProxy();
+        const tip = onBothost
+          ? 'На устройстве сохранено · облако недоступно, повтор…'
+          : 'На устройстве · откройте карту на bothost (не GitHub Pages)';
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        showSyncToast('На устройстве сохранено · облако недоступно, повтор…', 'warn', 4500);
+        showSyncToast(tip, 'warn', 5500);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).catch(function () {
+        const onBothost = typeof syncHasLocalProxy === 'function' && syncHasLocalProxy();
+        const tip = onBothost
+          ? 'На устройстве сохранено · облако недоступно, повтор…'
+          : 'На устройстве · откройте карту на bothost (не GitHub Pages)';
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        showSyncToast('На устройстве сохранено · облако недоступно, повтор…', 'warn', 4500);
+        showSyncToast(tip, 'warn', 5500);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
@@ -5118,6 +5179,23 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         });
       }
 
+      function readViaBothostState() {
+        const url = typeof bothostStateUrl === 'function' ? bothostStateUrl() : '';
+        if (!url) return Promise.reject(new Error('no bothost'));
+        return syncFetch(url + '?_=' + Date.now(), {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          cache: 'no-store',
+          timeout: SYNC_PULL_FAST_MS,
+          retries: 1
+        }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function (doc) {
+          return { items: itemsFromCompactDoc(doc), complete: true, source: 'bothost' };
+        });
+      }
+
       function readViaPagesMirror() {
         const base = pagesMirrorUrl();
         const url = base + (base.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
@@ -5147,12 +5225,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         });
       }
 
+      const pBothost = readViaBothostState().catch(function () { return null; });
       const pRoom = readViaRoom().catch(function () { return null; });
       const pExport = readViaExport().catch(function () { return null; });
       const pBlob = readViaJsonblob().catch(function () { return null; });
       const pPages = readViaPagesMirror().catch(function () { return null; });
 
       return firstSuccess([
+        pBothost.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pBlob.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pPages.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pRoom.then(function (v) { if (!v) throw new Error('x'); return v; }),
@@ -5160,22 +5240,26 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       ]).then(function (first) {
         // Fast first paint only — never prune/snapshot here (partial sources can wipe marks).
         applyPullResult(first, { prune: false, persist: false });
-        return Promise.all([pBlob, pPages, pRoom, pExport]).then(function (all) {
+        return Promise.all([pBothost, pBlob, pPages, pRoom, pExport]).then(function (all) {
           const merged = {};
           let any = false;
           let gotBlob = false;
+          let gotBothost = false;
           let hasLive = false;
           all.forEach(function (r) {
             if (!r || !r.items) return;
             any = true;
             if (r.source === 'jsonblob') gotBlob = true;
+            if (r.source === 'bothost') gotBothost = true;
             if (r.source && r.source !== 'pages') hasLive = true;
             mergeItemMaps(merged, r.items);
           });
           if (any) {
+            const src = gotBothost ? 'bothost' : (gotBlob ? 'jsonblob' : (hasLive ? 'mantle' : 'pages'));
             applyPullResult(
-              { items: merged, complete: gotBlob || hasLive, source: gotBlob ? 'jsonblob' : (hasLive ? 'mantle' : 'pages') },
-              { prune: gotBlob, persist: true }
+              { items: merged, complete: gotBothost || gotBlob || hasLive, source: src },
+              // Prune only from authoritative live stores (bothost/jsonblob), never from pages mirror.
+              { prune: gotBothost || gotBlob, persist: true }
             );
           }
           return true;
