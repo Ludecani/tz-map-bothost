@@ -3708,6 +3708,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     button.done-filter[data-status="none"].active { background: #6b7280; }
     button.done-filter[data-status="working"].active { background: #f59e0b; }
     button.done-filter[data-status="done"].active { background: #15803d; }
+    button.done-filter[data-status="base_station"].active { background: #0369a1; }
     .work-filter-row { flex-wrap: wrap; overflow: visible; }
     .work-status-btns { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
     .ws-btn {
@@ -3723,6 +3724,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     .ws-btn[data-status="none"].active { background: #6b7280; }
     .ws-btn[data-status="working"].active { background: #f59e0b; }
     .ws-btn[data-status="done"].active { background: #15803d; }
+    .ws-btn[data-status="base_station"].active { background: #0369a1; }
     button.obsl-filter.active { color: #fff; border-color: transparent; }
     button.obsl-filter[data-obsl="all"].active { background: #374151; }
     button.obsl-filter[data-obsl="yes"].active { background: #ea580c; }
@@ -3750,6 +3752,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     .popup b { display: block; margin-bottom: 4px; font-size: 14px; }
     .popup.done b { text-decoration: line-through; color: #6b7280; }
     .popup.working b { color: #b45309; }
+    .popup.base_station b { color: #0369a1; }
     .status-row {
       margin-top: 10px; padding-top: 10px; border-top: 1px solid #e5e7eb;
       display: flex; flex-direction: column; gap: 6px; font-size: 12px;
@@ -3960,6 +3963,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           <span><i class="dot" style="background:#7c3aed"></i>Хвойнинский</span>
           <span><i class="dot" style="background:#9ca3af"></i>Выполнено</span>
           <span><i class="dot" style="background:#fff;border:2px solid #f59e0b"></i>В работе</span>
+          <span><i class="dot" style="background:#fff;border:2px solid #0369a1"></i>Нужна БС</span>
           <span><i class="dot" style="background:#fff;border:2px solid #ea580c"></i>Обследование</span>
           <span class="note">● объекты ТЗ; покрытие — официальные карты операторов (слой на карте)</span>
           <span class="cov-legend"><i class="cov-swatch confirmed"></i>оператор в OSM</span>
@@ -3977,6 +3981,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
           <button type="button" class="done-filter" data-status="none">Не начато</button>
           <button type="button" class="done-filter" data-status="working">В работе</button>
           <button type="button" class="done-filter" data-status="done">Готово</button>
+          <button type="button" class="done-filter" data-status="base_station">Необходима базовая станция</button>
         </div>
         <div class="filters filter-scroll snap-x">
           <button class="district-filter active" data-f="all">Все районы</button>
@@ -4423,7 +4428,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     function remoteWorkStatus(remote) {
       if (!remote) return 'none';
-      if (remote.status === 'working' || remote.status === 'done') return remote.status;
+      if (remote.status === 'working' || remote.status === 'done' || remote.status === 'base_station') {
+        return remote.status;
+      }
       if (remote.done === true) return 'done';
       return 'none';
     }
@@ -4432,7 +4439,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const m = completedMeta[id];
       if (!m) return 'none';
       if (m.status === 'none') return 'none';
-      if (m.status === 'working' || m.status === 'done') return m.status;
+      if (m.status === 'working' || m.status === 'done' || m.status === 'base_station') return m.status;
       if (m.done === true) return 'done';
       return 'none';
     }
@@ -4443,6 +4450,10 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     function isWorking(id) {
       return getWorkStatus(id) === 'working';
+    }
+
+    function isBaseStation(id) {
+      return getWorkStatus(id) === 'base_station';
     }
 
     function getDoneMeta(id) {
@@ -4469,14 +4480,18 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const root = popupEl.querySelector('[data-id]');
       if (!root) return;
       const status = getWorkStatus(id);
-      root.className = status === 'done' ? 'popup done' : (status === 'working' ? 'popup working' : 'popup');
+      root.className = status === 'done'
+        ? 'popup done'
+        : (status === 'working' ? 'popup working' : (status === 'base_station' ? 'popup base_station' : 'popup'));
       root.querySelectorAll('.ws-btn').forEach(function (btn) {
         btn.classList.toggle('active', btn.dataset.status === status);
       });
       const title = root.querySelector('b');
       if (title) {
         title.style.textDecoration = status === 'done' ? 'line-through' : '';
-        title.style.color = status === 'done' ? '#6b7280' : (status === 'working' ? '#b45309' : '');
+        title.style.color = status === 'done'
+          ? '#6b7280'
+          : (status === 'working' ? '#b45309' : (status === 'base_station' ? '#0369a1' : ''));
       }
       const metaHtml = statusMetaLine(id);
       let meta = root.querySelector('.done-meta');
@@ -4700,7 +4715,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const m = completedMeta[id];
       if (!m || !m.by || getWorkStatus(id) === 'none') return '';
       const when = m.at ? new Date(m.at).toLocaleString('ru-RU') : '';
-      const label = getWorkStatus(id) === 'done' ? 'Выполнил' : 'В работе';
+      const label = getWorkStatus(id) === 'done'
+        ? 'Выполнил'
+        : (getWorkStatus(id) === 'base_station' ? 'Нужна БС' : 'В работе');
       return '<div class="done-meta">' + label + ': ' + escapeHtml(m.by) + (when ? ' · ' + escapeHtml(when) : '') + '</div>';
     }
 
@@ -5341,7 +5358,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         const id = idxToMarkerId(idx);
         if (!id) return;
         const code = Number(row[0]) || 0;
-        const status = code === 1 ? 'working' : (code === 2 ? 'done' : 'none');
+        const status = code === 1 ? 'working' : (code === 2 ? 'done' : (code === 3 ? 'base_station' : 'none'));
         if (status === 'none') return;
         items[id] = {
           status: status,
@@ -5360,7 +5377,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         if (st === 'none') return;
         const meta = completedMeta[item.id] || {};
         m[idToSyncIdx(item.id)] = [
-          st === 'working' ? 1 : 2,
+          st === 'working' ? 1 : (st === 'done' ? 2 : 3),
           String((meta.by || getSyncName() || '')).slice(0, 24),
           Number(meta.at) || Date.now()
         ];
@@ -5945,6 +5962,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       } else if (work === 'working') {
         borderColor = '#f59e0b';
         weight = 4;
+      } else if (work === 'base_station') {
+        borderColor = '#0369a1';
+        weight = 4;
       } else if (surveyed) {
         borderColor = '#ea580c';
         weight = 4;
@@ -5955,7 +5975,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         radius: mobile ? baseR + 3 : baseR,
         color: borderColor,
         weight: weight,
-        fillColor: work === 'done' ? '#9ca3af' : item.c,
+        fillColor: work === 'done' ? '#9ca3af' : (work === 'base_station' ? '#bae6fd' : item.c),
         fillOpacity: 1
       });
     }
@@ -6050,6 +6070,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
             btn('none', 'Не начато') +
             btn('working', 'В работе') +
             btn('done', 'Выполнено') +
+            btn('base_station', 'Необходима базовая станция') +
           '</div>' +
         '</div>'
       );
@@ -6058,7 +6079,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function buildPopup(item) {
       const km = item.km != null ? String(item.km).replace('.', ',') + ' км' : '—';
       const status = getWorkStatus(item.id);
-      const cls = status === 'done' ? 'popup done' : (status === 'working' ? 'popup working' : 'popup');
+      const cls = status === 'done'
+        ? 'popup done'
+        : (status === 'working' ? 'popup working' : (status === 'base_station' ? 'popup base_station' : 'popup'));
       const acc = accLabel(item.acc);
       const safeId = escapeHtml(item.id);
       const addr = item.a
@@ -6089,10 +6112,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function updateStats() {
       const doneCount = data.filter(item => isDone(item.id)).length;
       const workingCount = data.filter(item => isWorking(item.id)).length;
-      const noneCount = data.length - doneCount - workingCount;
+      const baseCount = data.filter(item => isBaseStation(item.id)).length;
+      const noneCount = data.length - doneCount - workingCount - baseCount;
       const obslCount = data.filter(item => hasSurvey(item)).length;
       document.getElementById('stats').innerHTML =
-        'Выполнено: <strong>' + doneCount + '</strong> · В работе: <strong style="color:#b45309">' + workingCount + '</strong> · Не начато: ' + noneCount;
+        'Выполнено: <strong>' + doneCount +
+        '</strong> · В работе: <strong style="color:#b45309">' + workingCount +
+        '</strong> · Нужна БС: <strong style="color:#0369a1">' + baseCount +
+        '</strong> · Не начато: ' + noneCount;
       document.getElementById('count').textContent = '(всего ' + data.length + ')';
       const obslEl = document.getElementById('obsl-stats');
       if (obslEl) {
@@ -6107,6 +6134,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         statusFilter === 'all' ||
         (statusFilter === 'done' && st === 'done') ||
         (statusFilter === 'working' && st === 'working') ||
+        (statusFilter === 'base_station' && st === 'base_station') ||
         (statusFilter === 'none' && st === 'none');
       const surveyed = hasSurvey(item);
       const obslOk =

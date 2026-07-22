@@ -235,7 +235,7 @@ def _normalize_compact(doc):
             code = int(row[0]) if row[0] is not None else 0
         except (TypeError, ValueError):
             continue
-        if code not in (1, 2):
+        if code not in (1, 2, 3):
             continue
         by = ""
         at = 0
