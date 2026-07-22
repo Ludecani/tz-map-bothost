@@ -3585,6 +3585,10 @@ const TZ_DOCS = {
   <script>
 // Sovmestnaya sinhronizaciya otmetok (MantleDB) — open namespace (browser-writable)
 const MAP_SYNC_DIRECT = 'https://mantledb.sh/v2/tzmap-public';
+const SYNC_API_ORIGIN_KEY = 'tz_sync_api_origin_v1';
+// Same-origin config on GitHub Pages (ludecani.github.io/tz-map-bothost/) — works in RU.
+const SYNC_API_CONFIG_FILE = 'sync-api.json';
+let resolvedSyncApiOrigin = '';
 
 function syncHasLocalProxy() {
   if (typeof location === 'undefined') return false;
@@ -3592,10 +3596,47 @@ function syncHasLocalProxy() {
   return h.includes('bothost.') || h === '127.0.0.1' || h === 'localhost' || /^192\.168\./.test(h);
 }
 
-function syncBaseUrl() {
-  if ((location.protocol === 'http:' || location.protocol === 'https:') && syncHasLocalProxy()) {
-    return location.origin.replace(/\/$/, '') + '/api/sync';
+function normalizeApiOrigin(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let o = raw.trim().replace(/\/$/, '');
+  if (!o) return '';
+  if (o.indexOf('http://') !== 0 && o.indexOf('https://') !== 0) o = 'https://' + o;
+  return o.replace(/\/$/, '');
+}
+
+function syncApiOrigin() {
+  if (resolvedSyncApiOrigin) return resolvedSyncApiOrigin;
+  try {
+    const q = new URLSearchParams(location.search).get('api');
+    const fromQ = normalizeApiOrigin(q || '');
+    if (fromQ) return fromQ;
+  } catch (e) {}
+  try {
+    const fromLs = normalizeApiOrigin(localStorage.getItem(SYNC_API_ORIGIN_KEY) || '');
+    if (fromLs) return fromLs;
+  } catch (e) {}
+  if (syncHasLocalProxy()) {
+    try { return location.origin.replace(/\/$/, ''); } catch (e2) {}
   }
+  return '';
+}
+
+function rememberSyncApiOrigin(origin) {
+  const o = normalizeApiOrigin(origin);
+  if (!o) return;
+  resolvedSyncApiOrigin = o;
+  try { localStorage.setItem(SYNC_API_ORIGIN_KEY, o); } catch (e) {}
+  try {
+    if (typeof MAP_SYNC !== 'undefined' && MAP_SYNC) {
+      MAP_SYNC.baseUrl = o + '/api/sync';
+      MAP_SYNC.usesProxy = true;
+    }
+  } catch (e3) {}
+}
+
+function syncBaseUrl() {
+  const api = syncApiOrigin();
+  if (api) return api + '/api/sync';
   return MAP_SYNC_DIRECT;
 }
 
@@ -3604,21 +3645,13 @@ function syncUsesProxy() {
 }
 
 function bothostStateUrl() {
-  if (!syncHasLocalProxy()) return '';
-  try {
-    return location.origin.replace(/\/$/, '') + '/api/sync/state';
-  } catch (e) {
-    return '';
-  }
+  const api = syncApiOrigin();
+  return api ? (api + '/api/sync/state') : '';
 }
 
 function mailruApiBase() {
-  if (!syncHasLocalProxy()) return '';
-  try {
-    return location.origin.replace(/\/$/, '') + '/api/mailru';
-  } catch (e) {
-    return '';
-  }
+  const api = syncApiOrigin();
+  return api ? (api + '/api/mailru') : '';
 }
 
 const MAP_SYNC = {
@@ -3995,7 +4028,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <div id="mailru-modal" aria-hidden="true">
     <div class="box" role="dialog" aria-labelledby="mailru-title">
       <h2 id="mailru-title">Вход Mail.ru</h2>
-      <p>Нужен, чтобы сохранять отметки в общий файл на Облаке Mail.ru. Пароль на сервер bothost уходит только для обмена на токен и не сохраняется.</p>
+      <p>Нужен, чтобы сохранять отметки в общий файл на Облаке Mail.ru. Пароль уходит только на сервер синхронизации для обмена на токен и не сохраняется. Пользуйтесь обычной ссылкой карты.</p>
       <label for="mailru-login">Почта</label>
       <input id="mailru-login" type="email" autocomplete="username" placeholder="name@mail.ru" />
       <label for="mailru-password">Пароль</label>
@@ -4085,7 +4118,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const modal = document.getElementById('mailru-modal');
       if (!modal) return;
       if (!mailruApiBase()) {
-        showSyncToast('Откройте карту на bothost — вход Mail.ru работает через сервер карты', 'warn', 6000);
+        showSyncToast('Сервер синхронизации ещё не найден — подождите или обновите страницу', 'warn', 6000);
+        bootstrapSyncApiOrigin().then(function (ok) {
+          if (ok && mailruApiBase()) openMailruModal();
+          else showSyncToast('Нет связи с API bothost. Проверьте sync-api.json или параметр ?api=', 'err', 7000);
+        });
         return;
       }
       modal.classList.add('open');
@@ -4108,7 +4145,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function submitMailruLogin() {
       const base = mailruApiBase();
       if (!base) {
-        showSyncToast('Нужен bothost URL для входа Mail.ru', 'err', 5000);
+        showSyncToast('Сервер синхронизации не найден — обновите страницу', 'err', 5000);
         return;
       }
       const loginEl = document.getElementById('mailru-login');
@@ -5249,14 +5286,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           }
           return true;
         }
-        const onBothost = typeof syncHasLocalProxy === 'function' && syncHasLocalProxy();
+        const onBothost = !!syncApiOrigin();
         const hasToken = !!getMailruToken();
         let tip = 'На устройстве сохранено · облако недоступно, повтор…';
         if (onBothost && !hasToken) {
           tip = 'Войдите через Mail.ru, чтобы писать в общий файл синхронизации';
           openMailruModal();
         } else if (!onBothost) {
-          tip = 'На устройстве · откройте карту на bothost и войдите в Mail.ru';
+          tip = 'На устройстве · войдите через Mail.ru после подключения облака';
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
         showSyncToast(tip, 'warn', 5500);
@@ -5264,8 +5301,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).catch(function () {
-        const onBothost = typeof syncHasLocalProxy === 'function' && syncHasLocalProxy();
-        const tip = onBothost && !getMailruToken()
+        const tip = syncApiOrigin() && !getMailruToken()
           ? 'Войдите через Mail.ru, чтобы сохранять отметки в облако'
           : 'На устройстве сохранено · облако недоступно, повтор…';
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
@@ -5650,8 +5686,16 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     function shareSyncLink() {
       const room = getSyncRoom();
-      const url = new URL(location.href);
+      // Always share the stable GitHub Pages link (старая ссылка).
+      let url;
+      try {
+        url = new URL('https://ludecani.github.io/tz-map-bothost/');
+      } catch (e) {
+        url = new URL(location.href);
+      }
       url.searchParams.set('room', room);
+      const api = syncApiOrigin();
+      if (api) url.searchParams.set('api', api);
       const text = url.toString();
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(function () {
@@ -5664,10 +5708,119 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       }
     }
 
+    function publishApiOriginToJsonblob(origin) {
+      const o = normalizeApiOrigin(origin);
+      if (!o || typeof SYNC_JSONBLOB_URL === 'undefined' || !SYNC_JSONBLOB_URL) {
+        return Promise.resolve(false);
+      }
+      return syncFetch(SYNC_JSONBLOB_URL + '?_=' + Date.now(), {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        cache: 'no-store',
+        timeout: 8000,
+        retries: 1
+      }).then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const etag = res.headers.get('ETag') || res.headers.get('etag') || '';
+        return res.json().then(function (doc) {
+          return { doc: doc, etag: etag };
+        });
+      }).then(function (got) {
+        const doc = (got.doc && typeof got.doc === 'object') ? got.doc : { v: 1, r: 'tz-map-novgorod', t: 0, m: {} };
+        if (doc._api === o) return true;
+        doc._api = o;
+        doc.t = Date.now();
+        const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+        if (got.etag) headers['If-Match'] = got.etag;
+        return syncFetch(SYNC_JSONBLOB_URL, {
+          method: 'PUT',
+          headers: headers,
+          body: JSON.stringify(doc),
+          cache: 'no-store',
+          timeout: 8000,
+          retries: 0
+        }).then(function (putRes) { return putRes.ok; });
+      }).catch(function () { return false; });
+    }
+
+    function bootstrapSyncApiOrigin() {
+      // 1) Already known
+      const current = syncApiOrigin();
+      if (current) {
+        rememberSyncApiOrigin(current);
+        if (syncHasLocalProxy()) publishApiOriginToJsonblob(current);
+        return Promise.resolve(true);
+      }
+
+      function tryConfigFile() {
+        let url = SYNC_API_CONFIG_FILE;
+        try { url = new URL(SYNC_API_CONFIG_FILE, location.href).toString(); } catch (e) {}
+        return syncFetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now(), {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          cache: 'no-store',
+          timeout: 6000,
+          retries: 1
+        }).then(function (res) {
+          if (!res.ok) throw new Error('no config');
+          return res.json();
+        }).then(function (cfg) {
+          const o = normalizeApiOrigin((cfg && (cfg.apiOrigin || cfg.api || cfg.origin)) || '');
+          if (!o) throw new Error('empty');
+          rememberSyncApiOrigin(o);
+          // Confirm / refresh via public-config when possible.
+          return syncFetch(o + '/api/public-config', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            cache: 'no-store',
+            timeout: 5000,
+            retries: 0
+          }).then(function (res) {
+            if (!res.ok) return true;
+            return res.json().then(function (body) {
+              const confirmed = normalizeApiOrigin((body && body.apiOrigin) || o);
+              if (confirmed) rememberSyncApiOrigin(confirmed);
+              return true;
+            });
+          }).catch(function () { return true; });
+        });
+      }
+
+      function tryJsonblobApi() {
+        if (typeof SYNC_JSONBLOB_URL === 'undefined' || !SYNC_JSONBLOB_URL) {
+          return Promise.reject(new Error('no blob'));
+        }
+        return syncFetch(SYNC_JSONBLOB_URL + '?_=' + Date.now(), {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          cache: 'no-store',
+          timeout: 6000,
+          retries: 1
+        }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function (doc) {
+          const o = normalizeApiOrigin((doc && doc._api) || '');
+          if (!o) throw new Error('no _api');
+          rememberSyncApiOrigin(o);
+          return true;
+        });
+      }
+
+      return tryConfigFile().catch(function () {
+        return tryJsonblobApi();
+      }).catch(function () {
+        return false;
+      });
+    }
+
     function initSyncUi() {
       const panel = document.getElementById('sync-panel');
       if (!panel) return;
       bindMailruUi();
+      bootstrapSyncApiOrigin().then(function () {
+        refreshMailruUi();
+      });
       const nameInput = document.getElementById('sync-name');
       const roomInput = document.getElementById('sync-room');
       if (nameInput) {

@@ -27,6 +27,173 @@ MAILRU_CLIENT_ID = "cloud-win"
 MAILRU_API = "https://cloud.mail.ru/api/v2"
 MAILRU_DISPATCH_U = "https://dispatcher.cloud.mail.ru/u"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+SYNC_JSONBLOB_URL = os.environ.get(
+    "SYNC_JSONBLOB_URL",
+    "https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-be39-75b48e1492d1",
+).strip()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "Ludecani/tz-map-bothost").strip()
+
+
+def _http_json(url, method="GET", data=None, headers=None, form=None, timeout=25):
+    h = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/plain, */*",
+    }
+    if headers:
+        h.update(headers)
+    body = data
+    if form is not None:
+        body = urllib.parse.urlencode(form).encode("utf-8")
+        h["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=body, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "json" in ctype or (raw[:1] in (b"{", b"[")):
+                try:
+                    return resp.status, json.loads(raw.decode("utf-8") or "null"), raw, dict(resp.headers)
+                except Exception:
+                    return resp.status, None, raw, dict(resp.headers)
+            return resp.status, None, raw, dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        raw = e.read() if hasattr(e, "read") else b""
+        parsed = None
+        try:
+            parsed = json.loads(raw.decode("utf-8") or "null")
+        except Exception:
+            parsed = None
+        return e.code, parsed, raw, dict(e.headers or {})
+
+
+def public_api_origin():
+    for key in ("PUBLIC_URL", "PUBLIC_BASE_URL", "DOMAIN", "BOTHOST_DOMAIN", "WEB_URL"):
+        v = (os.environ.get(key) or "").strip().rstrip("/")
+        if not v:
+            continue
+        if not v.startswith("http://") and not v.startswith("https://"):
+            v = "https://" + v
+        return v.rstrip("/")
+    bot_id = (os.environ.get("BOT_ID") or "").strip()
+    if bot_id:
+        return f"https://bot-{bot_id}.bothost.ru"
+    return ""
+
+
+def publish_api_origin_to_jsonblob(origin):
+    if not origin or not SYNC_JSONBLOB_URL:
+        return False
+    try:
+        st, parsed, raw, headers = _http_json(SYNC_JSONBLOB_URL, timeout=20)
+        if st != 200 or not isinstance(parsed, dict):
+            return False
+        if parsed.get("_api") == origin:
+            return True
+        parsed["_api"] = origin
+        parsed["t"] = int(time.time() * 1000)
+        body = json.dumps(parsed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        req_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": UA,
+        }
+        etag = headers.get("ETag") or headers.get("etag")
+        if etag:
+            req_headers["If-Match"] = etag
+        put = urllib.request.Request(SYNC_JSONBLOB_URL, data=body, headers=req_headers, method="PUT")
+        with urllib.request.urlopen(put, timeout=20) as resp:
+            return resp.status in (200, 201)
+    except Exception as e:
+        print(f"publish _api to jsonblob failed: {e}", flush=True)
+        return False
+
+
+def publish_sync_api_json_local(origin):
+    """Write sync-api.json next to the served app (bothost / local)."""
+    if not origin:
+        return False
+    payload = json.dumps(
+        {"apiOrigin": origin, "updatedAt": int(time.time() * 1000), "v": 1},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    written = False
+    for path in (
+        os.path.join(ROOT, "sync-api.json"),
+        os.path.join(BASE, "docs", "sync-api.json"),
+        os.path.join(BASE, "sync-api.json"),
+        os.path.join(BUILD, "sync-api.json"),
+    ):
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(payload)
+            written = True
+        except Exception:
+            continue
+    return written
+
+
+def publish_sync_api_json_github(origin):
+    """If GITHUB_TOKEN is set on bothost, update docs/sync-api.json so GitHub Pages picks it up."""
+    token = (
+        os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_API_TOKEN")
+        or ""
+    ).strip()
+    if not token or not origin or not GITHUB_REPO:
+        return False
+    api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/docs/sync-api.json"
+    payload_obj = {"apiOrigin": origin, "updatedAt": int(time.time() * 1000), "v": 1}
+    content = json.dumps(payload_obj, ensure_ascii=False, indent=2) + "\n"
+    import base64
+
+    b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": UA,
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    sha = None
+    try:
+        st, parsed, _, _ = _http_json(api, headers=headers, timeout=20)
+        if st == 200 and isinstance(parsed, dict):
+            sha = parsed.get("sha")
+    except Exception:
+        sha = None
+    body = {
+        "message": "chore: publish sync-api.json for GitHub Pages",
+        "content": b64,
+        "branch": os.environ.get("GITHUB_BRANCH", "main"),
+    }
+    if sha:
+        body["sha"] = sha
+    raw = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(api, data=raw, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ok = resp.status in (200, 201)
+            print(f"GitHub sync-api.json publish: {resp.status}", flush=True)
+            return ok
+    except Exception as e:
+        print(f"GitHub sync-api.json publish failed: {e}", flush=True)
+        return False
+
+
+def publish_public_api_origin():
+    origin = public_api_origin()
+    if not origin:
+        print("PUBLIC/DOMAIN/BOT_ID not set — Pages clients need docs/sync-api.json", flush=True)
+        return ""
+    print(f"Public API origin: {origin}", flush=True)
+    publish_sync_api_json_local(origin)
+    publish_api_origin_to_jsonblob(origin)
+    publish_sync_api_json_github(origin)
+    return origin
+
 
 
 def _seed_sync_candidates():
@@ -146,38 +313,6 @@ def save_sync_state_merge(incoming):
         merged = _merge_compact(current, incoming)
         _write_sync_state_unlocked(merged)
         return merged
-
-
-def _http_json(url, method="GET", data=None, headers=None, form=None, timeout=25):
-    h = {
-        "User-Agent": UA,
-        "Accept": "application/json, text/plain, */*",
-    }
-    if headers:
-        h.update(headers)
-    body = data
-    if form is not None:
-        body = urllib.parse.urlencode(form).encode("utf-8")
-        h["Content-Type"] = "application/x-www-form-urlencoded"
-    req = urllib.request.Request(url, data=body, headers=h, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            if "json" in ctype or (raw[:1] in (b"{", b"[")):
-                try:
-                    return resp.status, json.loads(raw.decode("utf-8") or "null"), raw, dict(resp.headers)
-                except Exception:
-                    return resp.status, None, raw, dict(resp.headers)
-            return resp.status, None, raw, dict(resp.headers)
-    except urllib.error.HTTPError as e:
-        raw = e.read() if hasattr(e, "read") else b""
-        parsed = None
-        try:
-            parsed = json.loads(raw.decode("utf-8") or "null")
-        except Exception:
-            parsed = None
-        return e.code, parsed, raw, dict(e.headers or {})
 
 
 def mailru_login(login, password):
@@ -552,6 +687,22 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _handle_mailru(self, method):
         path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/api/public-config" and method == "GET":
+            origin = public_api_origin() or ""
+            # If request Host looks public, prefer it when DOMAIN unset.
+            if not origin:
+                host = self.headers.get("Host") or ""
+                if host and "bothost." in host:
+                    origin = f"https://{host.split(':')[0]}"
+            self._json_response(
+                200,
+                {
+                    "apiOrigin": origin,
+                    "weblink": MAILRU_WEBLINK,
+                    "syncFile": MAILRU_SYNC_NAME,
+                },
+            )
+            return True
         if path == "/api/mailru/login" and method == "POST":
             raw = self._read_body()
             try:
@@ -635,6 +786,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/health", "/health/"):
+            # Learn public host from the platform proxy and publish for GitHub Pages clients.
+            host = (self.headers.get("Host") or "").split(":")[0].strip()
+            if host and "bothost." in host and not public_api_origin():
+                origin = f"https://{host}"
+                os.environ["DOMAIN"] = host
+                try:
+                    publish_sync_api_json_local(origin)
+                    publish_api_origin_to_jsonblob(origin)
+                    publish_sync_api_json_github(origin)
+                except Exception as e:
+                    print(f"host publish failed: {e}", flush=True)
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -711,6 +873,7 @@ if __name__ == "__main__":
     print("Sync proxy: /api/sync/ -> mantledb.sh", flush=True)
     print(f"Local sync store: {SYNC_STATE_PATH}", flush=True)
     print(f"Mail.ru sync weblink: {MAILRU_WEBLINK}/{MAILRU_SYNC_NAME}", flush=True)
+    publish_public_api_origin()
     for port in ports:
         if port == primary:
             continue
