@@ -14,7 +14,7 @@ on:
         type: string
         default: ""
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/2 * * * *"
   push:
     branches: [main]
     paths:
