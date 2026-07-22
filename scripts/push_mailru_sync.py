@@ -25,6 +25,7 @@ CLIENT_ID = "cloud-win"
 OAUTH_URL = "https://o2.mail.ru/token"
 API = "https://cloud.mail.ru/api/v2"
 DEFAULT_BLOB = "https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-be39-75b48e1492d1"
+DEFAULT_CRED_BLOB = "https://jsonblob.com/api/jsonBlob/019f8951-a116-7703-af0b-29e3d0e5845b"
 DEFAULT_WEBLINK = "fztm/mjzaGLfJv"
 DEFAULT_NAME = "sync-state.json"
 
@@ -334,16 +335,33 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-def main() -> int:
+def load_credentials() -> tuple[str, str, str]:
+    """Return (email, password, source). Prefer env/secrets; fallback to cred blob."""
     email = _env_first("MAILRU_LOGIN", "MAILRU_EMAIL", "MAIL_LOGIN")
     password = _env_first("MAILRU_PASSWORD", "MAILRU_PASS", "MAILRU_APP_PASSWORD", "MAIL_PASSWORD")
+    if email and password:
+        return email, password, "env"
+
+    cred_url = (os.environ.get("MAILRU_CRED_BLOB_URL") or DEFAULT_CRED_BLOB).strip()
+    status, raw, _ = http(cred_url + ("&" if "?" in cred_url else "?") + "_=" + str(int(time.time() * 1000)))
+    if status != 200:
+        raise SystemExit(f"cred_blob_http_{status}:{raw[:200]!r}")
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except Exception as e:
+        raise SystemExit(f"cred_blob_bad_json:{e}")
+    if not isinstance(doc, dict):
+        raise SystemExit("cred_blob_not_object")
+    email = str(doc.get("login") or doc.get("email") or "").strip()
+    password = str(doc.get("password") or doc.get("pass") or "").strip()
     if not email or not password:
-        print(
-            "ERROR: secrets empty. Add Repository secrets MAILRU_LOGIN and MAILRU_PASSWORD at "
-            "https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions",
-            file=sys.stderr,
-        )
-        return 2
+        raise SystemExit("cred_blob_missing_login_or_password")
+    return email, password, "cred_blob"
+
+
+def main() -> int:
+    email, password, source = load_credentials()
+    print(f"credentials source={source}")
 
     blob_url = (os.environ.get("SYNC_JSONBLOB_URL") or DEFAULT_BLOB).strip()
     weblink = (os.environ.get("MAILRU_WEBLINK") or DEFAULT_WEBLINK).strip()
