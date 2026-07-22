@@ -421,23 +421,26 @@ def _mailru_public_download_base():
     if status == 200 and isinstance(parsed, dict):
         rows = ((parsed.get("body") or {}).get("weblink_get") or [])
         if rows and rows[0].get("url"):
-            # e.g. https://cloclo52.cloud.mail.ru/public/TOKEN/g/no → use host /public/
+            # Content is served via /weblink/view/, not /public/ (404 for this share).
             url = rows[0]["url"]
             try:
                 parts = urllib.parse.urlsplit(url)
-                return f"{parts.scheme}://{parts.netloc}/public"
+                return f"{parts.scheme}://{parts.netloc}/weblink/view"
             except Exception:
                 pass
-    return "https://cloclo52.cloud.mail.ru/public"
+    return "https://cloclo52.cloud.mail.ru/weblink/view"
 
 
 def mailru_read_sync_doc(token=None):
     """Read sync-state.json from the public weblink folder (auth optional for public files)."""
-    # 1) Direct public CDN-style URL
+    # 1) Direct weblink/view CDN-style URL
     base = _mailru_public_download_base()
     candidates = [
         f"{base}/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
-        f"https://cloud.mail.ru/public/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
+        f"https://cloclo52.cloud.mail.ru/weblink/view/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
+        f"https://cloclo53.cloud.mail.ru/weblink/view/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
+        f"https://cloclo61.cloud.mail.ru/weblink/view/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
+        f"https://cloclo64.cloud.mail.ru/weblink/view/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
     ]
     if token:
         q = urllib.parse.urlencode(
@@ -481,7 +484,8 @@ def mailru_read_sync_doc(token=None):
                 wl = str(item.get("weblink") or f"{MAILRU_WEBLINK}/{MAILRU_SYNC_NAME}").lstrip("/")
                 for url in (
                     f"{base}/{wl}",
-                    f"https://cloud.mail.ru/public/{wl}",
+                    f"https://cloclo52.cloud.mail.ru/weblink/view/{wl}",
+                    f"https://cloclo53.cloud.mail.ru/weblink/view/{wl}",
                 ):
                     st2, _, raw2, _ = _http_json(url, timeout=20)
                     if st2 == 200 and raw2:
