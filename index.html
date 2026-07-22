@@ -3921,7 +3921,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     const SYNC_FETCH_RETRIES = 2;
     const SYNC_PULL_FAST_MS = 4000;
     const SYNC_PULL_SLOW_MS = 9000;
-    const SYNC_SAVE_MS = 3500;
+    const SYNC_SAVE_MS = 6000;
 
     function syncFetch(url, opts) {
       opts = opts || {};
@@ -4532,17 +4532,50 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       syncPushTimer = setTimeout(function () { pushSyncState(); }, 80);
     }
 
+    function mergeCompactDocs(remoteDoc, localDoc) {
+      const out = { v: 1, r: (localDoc && localDoc.r) || (remoteDoc && remoteDoc.r) || 'tz-map-novgorod', t: Date.now(), m: {} };
+      const remoteM = (remoteDoc && remoteDoc.m) || {};
+      const localM = (localDoc && localDoc.m) || {};
+      Object.keys(remoteM).forEach(function (idx) {
+        const row = remoteM[idx];
+        if (row && row.length) out.m[idx] = row.slice(0);
+      });
+      Object.keys(localM).forEach(function (idx) {
+        const loc = localM[idx];
+        if (!loc || !loc.length) return;
+        const rem = out.m[idx];
+        const locAt = Number(loc[2]) || 0;
+        const remAt = rem ? (Number(rem[2]) || 0) : 0;
+        if (!rem || locAt >= remAt) out.m[idx] = loc.slice(0);
+      });
+      return out;
+    }
+
     function pushJsonblobSnapshot() {
       if (typeof SYNC_JSONBLOB_URL === 'undefined' || !SYNC_JSONBLOB_URL) {
         return Promise.resolve(false);
       }
-      const body = JSON.stringify(buildCompactDoc());
-      return syncFetchOne(SYNC_JSONBLOB_URL, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: body,
+      const localDoc = buildCompactDoc();
+      const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+      // Read-merge-write so one client's full PUT cannot erase another's newer marks.
+      return syncFetchOne(SYNC_JSONBLOB_URL + '?_=' + Date.now(), {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
         timeout: SYNC_SAVE_MS,
-        retries: 2
+        retries: 1
+      }).then(function (res) {
+        return res.json();
+      }).catch(function () {
+        return null;
+      }).then(function (remoteDoc) {
+        const merged = mergeCompactDocs(remoteDoc, localDoc);
+        return syncFetchOne(SYNC_JSONBLOB_URL, {
+          method: 'PUT',
+          headers: headers,
+          body: JSON.stringify(merged),
+          timeout: SYNC_SAVE_MS,
+          retries: 2
+        });
       }).then(function () { return true; });
     }
 
@@ -4677,23 +4710,23 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       rememberOutboxIds(allIds);
       setSyncStatus('сохранение…', 'warn');
 
-      // Race writable mirrors; first success wins. Never wait on a hung Mantle mark-queue.
+      // jsonblob is the shared source of truth for all devices; Mantle is best-effort only.
       const blobP = pushJsonblobSnapshot().catch(function () { return false; });
-      const roomP = pushMantleRoomSnapshot().catch(function () { return false; });
+      // Kick Mantle in parallel, but never treat it as enough to clear the outbox.
+      pushMantleRoomSnapshot().catch(function () { return false; });
+      pushMantleMarksBackground(allIds);
 
-      return firstTrue([blobP, roomP]).then(function (ok) {
+      return blobP.then(function (ok) {
         if (ok) {
           finishLocalCloudSave(allIds);
-          // Extra best-effort fanout; ignore result.
-          pushMantleMarksBackground(allIds);
           return true;
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        setTimeout(function () { pushSyncState(); }, 2000);
+        setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).catch(function () {
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        setTimeout(function () { pushSyncState(); }, 2000);
+        setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).finally(function () {
         syncPushInFlight = false;
