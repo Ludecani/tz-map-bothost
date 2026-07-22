@@ -239,12 +239,27 @@ def verify_public(weblink: str, name: str) -> bool:
     return False
 
 
+def _env_first(*names: str) -> str:
+    for name in names:
+        val = os.environ.get(name)
+        if val is None:
+            continue
+        val = str(val).strip()
+        if val:
+            return val
+    return ""
+
+
 def main() -> int:
-    email = (os.environ.get("MAILRU_LOGIN") or "").strip()
-    password = os.environ.get("MAILRU_PASSWORD") or ""
+    email = _env_first("MAILRU_LOGIN", "MAILRU_EMAIL", "MAIL_LOGIN")
+    password = _env_first("MAILRU_PASSWORD", "MAILRU_PASS", "MAILRU_APP_PASSWORD", "MAIL_PASSWORD")
     if not email or not password:
-        print("SKIP: set MAILRU_LOGIN and MAILRU_PASSWORD (app password) repository secrets", file=sys.stderr)
-        return 0
+        print(
+            "ERROR: secrets empty. Add Repository secrets MAILRU_LOGIN and MAILRU_PASSWORD at "
+            "https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions",
+            file=sys.stderr,
+        )
+        return 2
 
     blob_url = (os.environ.get("SYNC_JSONBLOB_URL") or DEFAULT_BLOB).strip()
     weblink = (os.environ.get("MAILRU_WEBLINK") or DEFAULT_WEBLINK).strip()

@@ -19,10 +19,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check repository secrets
+        env:
+          # Accept a few common alternate names so a typo is less fatal.
+          MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
+          MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
+        run: |
+          echo "MAILRU_LOGIN present: $([ -n \"${MAILRU_LOGIN}\" ] && echo YES || echo NO)"
+          echo "MAILRU_PASSWORD present: $([ -n \"${MAILRU_PASSWORD}\" ] && echo YES || echo NO)"
+          if [ -z "${MAILRU_LOGIN}" ] || [ -z "${MAILRU_PASSWORD}" ]; then
+            echo "::error::Secrets are empty. Add Repository secrets (not Environment) named exactly MAILRU_LOGIN and MAILRU_PASSWORD."
+            echo "Open: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions"
+            echo "MAILRU_LOGIN = full email (e.g. rusakov_751@bk.ru)"
+            echo "MAILRU_PASSWORD = пароль для внешних приложений (not the normal mailbox password)"
+            exit 1
+          fi
+
       - name: Upload sync-state.json to Mail.ru shared folder
         env:
-          MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN }}
-          MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD }}
+          MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
+          MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
           SYNC_JSONBLOB_URL: ${{ secrets.SYNC_JSONBLOB_URL }}
           MAILRU_WEBLINK: ${{ secrets.MAILRU_WEBLINK }}
           MAILRU_SYNC_NAME: ${{ secrets.MAILRU_SYNC_NAME }}
