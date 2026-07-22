@@ -66,6 +66,26 @@ def _http_json(url, method="GET", data=None, headers=None, form=None, timeout=25
         return e.code, parsed, raw, dict(e.headers or {})
 
 
+def is_publishable_bothost_origin(origin):
+    """Reject placeholders / fake Host values that previously poisoned Pages clients."""
+    o = (origin or "").strip().rstrip("/").lower()
+    if not o:
+        return False
+    if o.startswith("http://"):
+        o = "https://" + o[len("http://") :]
+    if not o.startswith("https://"):
+        o = "https://" + o
+    host = o[len("https://") :].split("/", 1)[0].split(":", 1)[0]
+    if host in ("bot-123.bothost.ru", "localhost", "127.0.0.1"):
+        return False
+    if not host.endswith(".bothost.ru"):
+        return False
+    # Real bothost bots look like bot-<id>.bothost.ru
+    if not host.startswith("bot-"):
+        return False
+    return True
+
+
 def public_api_origin():
     for key in ("PUBLIC_URL", "PUBLIC_BASE_URL", "DOMAIN", "BOTHOST_DOMAIN", "WEB_URL"):
         v = (os.environ.get(key) or "").strip().rstrip("/")
@@ -73,15 +93,23 @@ def public_api_origin():
             continue
         if not v.startswith("http://") and not v.startswith("https://"):
             v = "https://" + v
-        return v.rstrip("/")
+        v = v.rstrip("/")
+        if is_publishable_bothost_origin(v) or "bothost." not in v.lower():
+            # Allow non-bothost custom domains from env; still reject bot-123.
+            if "bot-123.bothost.ru" in v.lower():
+                continue
+            return v
     bot_id = (os.environ.get("BOT_ID") or "").strip()
-    if bot_id:
+    if bot_id and bot_id != "123":
         return f"https://bot-{bot_id}.bothost.ru"
     return ""
 
 
 def publish_api_origin_to_jsonblob(origin):
     if not origin or not SYNC_JSONBLOB_URL:
+        return False
+    if "bothost." in origin.lower() and not is_publishable_bothost_origin(origin):
+        print(f"skip jsonblob _api publish for unsafe origin: {origin}", flush=True)
         return False
     try:
         st, parsed, raw, headers = _http_json(SYNC_JSONBLOB_URL, timeout=20)
@@ -111,6 +139,8 @@ def publish_api_origin_to_jsonblob(origin):
 def publish_sync_api_json_local(origin):
     """Write sync-api.json next to the served app (bothost / local)."""
     if not origin:
+        return False
+    if "bothost." in origin.lower() and not is_publishable_bothost_origin(origin):
         return False
     payload = json.dumps(
         {"apiOrigin": origin, "updatedAt": int(time.time() * 1000), "v": 1},
@@ -143,6 +173,8 @@ def publish_sync_api_json_github(origin):
         or ""
     ).strip()
     if not token or not origin or not GITHUB_REPO:
+        return False
+    if "bothost." in origin.lower() and not is_publishable_bothost_origin(origin):
         return False
     api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/docs/sync-api.json"
     payload_obj = {"apiOrigin": origin, "updatedAt": int(time.time() * 1000), "v": 1}
@@ -691,9 +723,10 @@ class Handler(SimpleHTTPRequestHandler):
             origin = public_api_origin() or ""
             # If request Host looks public, prefer it when DOMAIN unset.
             if not origin:
-                host = self.headers.get("Host") or ""
-                if host and "bothost." in host:
-                    origin = f"https://{host.split(':')[0]}"
+                host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+                candidate = f"https://{host}" if host else ""
+                if is_publishable_bothost_origin(candidate):
+                    origin = candidate
             self._json_response(
                 200,
                 {
@@ -787,9 +820,10 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/health", "/health/"):
             # Learn public host from the platform proxy and publish for GitHub Pages clients.
-            host = (self.headers.get("Host") or "").split(":")[0].strip()
-            if host and "bothost." in host and not public_api_origin():
-                origin = f"https://{host}"
+            # Only accept real bothost hosts — never placeholders like bot-123.
+            host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+            origin = f"https://{host}" if host else ""
+            if is_publishable_bothost_origin(origin) and not public_api_origin():
                 os.environ["DOMAIN"] = host
                 try:
                     publish_sync_api_json_local(origin)
