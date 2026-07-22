@@ -3721,30 +3721,43 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     #sync-toast {
       position: fixed;
       left: 50%;
-      bottom: max(24px, env(safe-area-inset-bottom));
-      transform: translateX(-50%) translateY(16px);
-      z-index: 10000;
-      max-width: min(92vw, 420px);
-      padding: 12px 18px;
-      border-radius: 10px;
+      top: max(12px, env(safe-area-inset-top));
+      bottom: auto;
+      transform: translateX(-50%) translateY(-12px);
+      z-index: 2147483000;
+      max-width: min(94vw, 460px);
+      width: max-content;
+      padding: 14px 20px;
+      border-radius: 12px;
       background: #14532d;
       color: #f0fdf4;
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 15px;
+      font-weight: 700;
       line-height: 1.35;
       text-align: center;
-      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.28);
+      box-shadow: 0 10px 28px rgba(15, 23, 42, 0.35);
       opacity: 0;
       pointer-events: none;
-      transition: opacity 0.22s ease, transform 0.22s ease;
+      transition: opacity 0.2s ease, transform 0.2s ease;
     }
     #sync-toast.show {
-      opacity: 1;
+      opacity: 1 !important;
       transform: translateX(-50%) translateY(0);
       pointer-events: auto;
     }
     #sync-toast.warn { background: #92400e; color: #fffbeb; }
     #sync-toast.err { background: #991b1b; color: #fef2f2; }
+    .popup-save-note {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #dcfce7;
+      color: #14532d;
+      font-size: 12px;
+      font-weight: 700;
+      text-align: center;
+    }
+    .popup-save-note.warn { background: #ffedd5; color: #9a3412; }
     .done-meta { margin-top: 4px; font-size: 10px; color: #6b7280; }
     .leaflet-popup-content { margin: 10px 12px; }
     .leaflet-popup-content-wrapper { border-radius: 10px; }
@@ -3786,7 +3799,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       .sync-row input { width: 100%; min-width: 0; box-sizing: border-box; font-size: 16px; }
       .sync-row button { width: 100%; }
       #sync-status { min-width: 0; text-align: center; }
-      #sync-toast { font-size: 15px; padding: 14px 18px; bottom: max(18px, env(safe-area-inset-bottom)); }
+      #sync-toast { font-size: 16px; padding: 16px 18px; top: max(10px, env(safe-area-inset-top)); width: min(94vw, 460px); }
       .popup { font-size: 14px; min-width: 0; max-width: 100%; }
       .popup b { font-size: 15px; }
       .status-row label { min-height: 40px; padding: 4px 0; }
@@ -4216,9 +4229,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       markDirtySync(id);
       saveCompletedMeta();
       setSyncStatus('сохранение…', 'warn');
+      showSyncToast('Сохранение…', 'warn', 2500);
       refreshMarker(id);
       updateStats();
       applyFilters(false);
+      showPopupSaveNote(id, 'Сохранение…', 'warn');
       queueCloudSave(true);
     }
 
@@ -4314,15 +4329,54 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     let syncToastTimer = null;
     function showSyncToast(text, cls, ms) {
-      const el = document.getElementById('sync-toast');
-      if (!el || !text) return;
+      let el = document.getElementById('sync-toast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'sync-toast';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'assertive');
+        document.body.appendChild(el);
+      } else if (el.parentElement !== document.body) {
+        document.body.appendChild(el);
+      }
+      if (!text) return;
       el.textContent = text;
+      el.className = '';
+      // Force reflow so the show animation always restarts.
+      void el.offsetWidth;
       el.className = (cls || 'ok') + ' show';
+      el.style.opacity = '1';
+      el.style.transform = 'translateX(-50%) translateY(0)';
+      el.style.pointerEvents = 'auto';
       if (syncToastTimer) clearTimeout(syncToastTimer);
       syncToastTimer = setTimeout(function () {
         el.classList.remove('show');
+        el.style.opacity = '';
+        el.style.transform = '';
+        el.style.pointerEvents = '';
         syncToastTimer = null;
-      }, ms || 3200);
+      }, ms || 5500);
+    }
+
+    function showPopupSaveNote(id, text, cls) {
+      if (!id || !text) return;
+      const entry = markerMap.get(id);
+      if (!entry || !entry.marker || !entry.marker.isPopupOpen()) return;
+      const root = entry.marker.getPopup().getElement();
+      if (!root) return;
+      const popup = root.querySelector('[data-id]') || root;
+      let note = popup.querySelector('.popup-save-note');
+      if (!note) {
+        note = document.createElement('div');
+        note.className = 'popup-save-note';
+        popup.appendChild(note);
+      }
+      note.className = 'popup-save-note' + (cls === 'warn' || cls === 'err' ? ' warn' : '');
+      note.textContent = text;
+      if (note._hideTimer) clearTimeout(note._hideTimer);
+      note._hideTimer = setTimeout(function () {
+        if (note && note.parentNode) note.parentNode.removeChild(note);
+      }, 5000);
     }
 
     function statusMetaLine(id) {
@@ -4700,9 +4754,13 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       syncConnected = true;
       setSyncStatus('сохранено', 'ok');
       const n = dirtyIds && dirtyIds.length ? dirtyIds.length : 0;
-      showSyncToast(n > 1
+      const msg = n > 1
         ? ('Изменения успешно сохранены · ' + n)
-        : 'Изменения успешно сохранены', 'ok');
+        : 'Изменения успешно сохранены';
+      showSyncToast(msg, 'ok', 5500);
+      if (dirtyIds && dirtyIds.length) {
+        showPopupSaveNote(dirtyIds[dirtyIds.length - 1], msg, 'ok');
+      }
     }
 
     function firstTrue(promises) {
@@ -4768,10 +4826,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           return true;
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
+        showSyncToast('На устройстве сохранено · облако недоступно, повтор…', 'warn', 4500);
+        if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).catch(function () {
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
+        showSyncToast('На устройстве сохранено · облако недоступно, повтор…', 'warn', 4500);
+        if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).finally(function () {
