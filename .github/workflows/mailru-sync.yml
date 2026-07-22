@@ -22,13 +22,12 @@ jobs:
 
       - name: Check repository secrets
         env:
-          # Accept a few common alternate names so a typo is less fatal.
           MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
           MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
         run: |
-          echo "MAILRU_LOGIN present: $([ -n \"${MAILRU_LOGIN}\" ] && echo YES || echo NO)"
-          echo "MAILRU_PASSWORD present: $([ -n \"${MAILRU_PASSWORD}\" ] && echo YES || echo NO)"
-          if [ -z "${MAILRU_LOGIN}" ] || [ -z "${MAILRU_PASSWORD}" ]; then
+          if [ -n "$MAILRU_LOGIN" ]; then echo "MAILRU_LOGIN present: YES"; else echo "MAILRU_LOGIN present: NO"; fi
+          if [ -n "$MAILRU_PASSWORD" ]; then echo "MAILRU_PASSWORD present: YES"; else echo "MAILRU_PASSWORD present: NO"; fi
+          if [ -z "$MAILRU_LOGIN" ] || [ -z "$MAILRU_PASSWORD" ]; then
             echo "::error::Secrets are empty. Add Repository secrets (not Environment) named exactly MAILRU_LOGIN and MAILRU_PASSWORD."
             echo "Open: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions"
             echo "MAILRU_LOGIN = full email (e.g. rusakov_751@bk.ru)"
