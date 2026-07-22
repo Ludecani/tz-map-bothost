@@ -5,7 +5,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <meta name="tz-map-build" content="2026-07-22T08:45Z" />
+  <meta name="tz-map-build" content="2026-07-22T08:55Z" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -4009,7 +4009,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
-      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.08:45</span>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.08:55</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -4296,6 +4296,72 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       return m ? m[0] : '';
     }
 
+    function mailruPublicSyncUrls() {
+      return [
+        'https://cloclo53.cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME),
+        'https://cloclo51.cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME),
+        'https://cloclo64.cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME),
+        'https://cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME)
+      ];
+    }
+
+    function mailruVerifyPublicSyncFile() {
+      const urls = mailruPublicSyncUrls();
+      function tryUrl(i) {
+        if (i >= urls.length) return Promise.resolve(false);
+        return mailruDirectFetch(urls[i] + '?_=' + Date.now(), {
+          method: 'GET',
+          headers: { 'Accept': 'application/json,text/plain,*/*' },
+          timeout: 12000
+        }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function (doc) {
+          return !!(doc && typeof doc === 'object' && doc.m && typeof doc.m === 'object');
+        }).catch(function () { return tryUrl(i + 1); });
+      }
+      return tryUrl(0);
+    }
+
+    function mailruWaitPublicSyncFile(tries) {
+      const max = Math.max(1, Number(tries) || 8);
+      function loop(n) {
+        return mailruVerifyPublicSyncFile().then(function (ok) {
+          if (ok) return true;
+          if (n >= max) return false;
+          return new Promise(function (resolve) { setTimeout(resolve, 700 + n * 200); })
+            .then(function () { return loop(n + 1); });
+        });
+      }
+      return loop(1);
+    }
+
+    function mailruResolveFolderTargets(token) {
+      const targets = [
+        '/' + MAILRU_WEBLINK + '/' + MAILRU_SYNC_NAME,
+        MAILRU_WEBLINK + '/' + MAILRU_SYNC_NAME,
+        '/Синхронизация/' + MAILRU_SYNC_NAME,
+        '/Синхронизация/sync-state.json'
+      ];
+      return mailruDirectFetch(
+        MAILRU_API + '/folder?weblink=' + encodeURIComponent('/' + MAILRU_WEBLINK)
+          + '&access_token=' + encodeURIComponent(token),
+        { method: 'GET', headers: { 'Accept': 'application/json' }, timeout: 15000 }
+      ).then(function (res) {
+        return res.json().catch(function () { return {}; });
+      }).then(function (doc) {
+        const body = (doc && doc.body && typeof doc.body === 'object') ? doc.body : {};
+        if (body.home) {
+          const home = String(body.home).replace(/\/$/, '');
+          targets.unshift(home + '/' + MAILRU_SYNC_NAME);
+        }
+        if (body.name) {
+          targets.push('/' + String(body.name) + '/' + MAILRU_SYNC_NAME);
+        }
+        return targets;
+      }).catch(function () { return targets; });
+    }
+
     function mailruDirectUploadHash(token, bytes) {
       const u8 = (bytes instanceof Uint8Array) ? bytes : mailruUtf8Bytes(bytes);
 
@@ -4307,10 +4373,15 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
             'Accept': '*/*'
           },
           body: u8,
-          timeout: 90000
+          timeout: 90000,
+          proxyTries: MAILRU_CORS_PROXIES.length
         }).then(function (res) {
           return res.text().then(function (txt) {
-            return { ok: res.ok, status: res.status, txt: txt, hash: mailruExtractHash(txt) };
+            const hash = mailruExtractHash(txt);
+            if (!hash) {
+              throw new Error('upload_no_hash_' + res.status);
+            }
+            return hash;
           });
         });
       }
@@ -4321,6 +4392,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         ['upload', 'public_upload'].forEach(function (key) {
           const rows = body[key] || [];
           if (rows[0] && rows[0].url) urls.push(String(rows[0].url));
+        });
+        // dispatcher sometimes returns map form {upload:{url:...}}
+        ['upload', 'public_upload'].forEach(function (key) {
+          const row = body[key];
+          if (row && !Array.isArray(row) && row.url) urls.push(String(row.url));
         });
         return urls;
       }
@@ -4345,34 +4421,41 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           if (shard) candidates.push(shard);
         }).catch(function () {});
       }).then(function () {
-        candidates.push('https://uploader.cloud.mail.ru/upload/');
+        // Prefer public_upload shard for shared-folder writes.
+        candidates.unshift('https://pu.cloud.mail.ru/upload/?cloud_domain=2');
         candidates.push('https://uploader.cloud.mail.ru/upload-web/');
-        candidates.push('https://pu.cloud.mail.ru/upload/?cloud_domain=2');
+        candidates.push('https://uploader.cloud.mail.ru/upload/');
 
         const uniq = [];
         candidates.forEach(function (u) {
           if (!u) return;
-          const base = String(u).replace(/\/?$/, '/');
-          const full = base.indexOf('?') >= 0 ? (base + '&' + q) : (base + '?' + q);
+          let full = String(u);
+          if (full.indexOf('?') >= 0) {
+            if (full.indexOf('token=') < 0) full += (full.slice(-1) === '?' || full.slice(-1) === '&' ? '' : '&') + q;
+          } else {
+            full = full.replace(/\/?$/, '/') + '?' + q;
+          }
           if (uniq.indexOf(full) < 0) uniq.push(full);
         });
 
         function tryOne(i) {
           if (i >= uniq.length) {
-            return Promise.reject(new Error('upload_failed'));
+            return Promise.reject(new Error('Не удалось загрузить байты в Mail.ru (upload shard)'));
           }
-          return putTo(uniq[i]).then(function (got) {
-            if (got.hash) return got.hash;
-            return tryOne(i + 1);
-          }).catch(function () { return tryOne(i + 1); });
+          return putTo(uniq[i]).catch(function () { return tryOne(i + 1); });
         }
         return tryOne(0);
       });
     }
 
-    function mailruDirectFileAdd(token, fileHash, size) {
-      const weblinkPath = '/' + MAILRU_WEBLINK + '/' + MAILRU_SYNC_NAME;
+    function mailruDirectFileAdd(token, fileHash, size, homeTargets) {
       const hash = String(fileHash || '').toUpperCase();
+      const weblinkPathSlash = '/' + MAILRU_WEBLINK + '/' + MAILRU_SYNC_NAME;
+      const weblinkPathPlain = MAILRU_WEBLINK + '/' + MAILRU_SYNC_NAME;
+      const homes = (homeTargets && homeTargets.length) ? homeTargets.slice(0) : [
+        weblinkPathSlash,
+        '/Синхронизация/' + MAILRU_SYNC_NAME
+      ];
 
       function post(path, formObj) {
         return mailruDirectFetch(MAILRU_API + path, {
@@ -4382,65 +4465,79 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           timeout: 30000
         }).then(function (res) {
           return res.json().catch(function () { return {}; }).then(function (data) {
-            return { ok: res.ok || (data && data.status === 200), status: res.status, data: data };
+            const ok = !!(res.ok || (data && data.status === 200));
+            return { ok: ok, status: res.status, data: data };
           });
         });
       }
 
-      const attempts = [
-        function () {
-          return post('/weblinks/file/add', {
-            weblink: weblinkPath,
-            hash: hash,
-            size: String(size),
-            conflict: 'rewrite',
-            upload_type: 'manual',
-            api: '2',
-            access_token: token,
-            platform: 'desktop_web'
-          });
-        },
-        function () {
-          return post('/weblinks/file/add', {
-            weblink_id: '/' + MAILRU_WEBLINK,
-            file_path: '/' + MAILRU_SYNC_NAME,
-            home: '/' + MAILRU_SYNC_NAME,
-            weblink: weblinkPath,
-            hash: hash,
-            size: String(size),
-            conflict: 'rewrite',
-            upload_type: 'manual',
-            api: '2',
-            access_token: token
-          });
-        },
-        function () {
-          return post('/weblinks/file/add', {
-            weblink: weblinkPath,
-            hash: hash,
-            size: String(size),
-            conflict: 'rename',
-            upload_type: 'manual',
-            api: '2',
-            access_token: token
-          });
-        },
-        // Fallback: write into the account root, then it at least lands in Mail.ru Cloud.
-        function () {
+      const attempts = [];
+      // Shared public folder registration variants.
+      attempts.push(function () {
+        return post('/weblinks/file/add', {
+          weblink: weblinkPathSlash,
+          hash: hash,
+          size: String(size),
+          conflict: 'rewrite',
+          upload_type: 'manual',
+          api: '2',
+          access_token: token,
+          platform: 'desktop_web'
+        });
+      });
+      attempts.push(function () {
+        return post('/weblinks/file/add', {
+          weblink: weblinkPathPlain,
+          hash: hash,
+          size: String(size),
+          conflict: 'rewrite',
+          upload_type: 'manual',
+          api: '2',
+          access_token: token
+        });
+      });
+      attempts.push(function () {
+        return post('/weblinks/file/add', {
+          weblink: '/' + MAILRU_WEBLINK + '/',
+          name: MAILRU_SYNC_NAME,
+          hash: hash,
+          size: String(size),
+          conflict: 'rewrite',
+          upload_type: 'manual',
+          api: '2',
+          access_token: token
+        });
+      });
+      attempts.push(function () {
+        return post('/weblinks/file/add', {
+          weblink_id: MAILRU_WEBLINK,
+          file_path: '/' + MAILRU_SYNC_NAME,
+          weblink: weblinkPathSlash,
+          hash: hash,
+          size: String(size),
+          conflict: 'rewrite',
+          api: '2',
+          access_token: token
+        });
+      });
+      homes.forEach(function (home) {
+        const h = String(home || '');
+        if (!h) return;
+        attempts.push(function () {
           return post('/file/add', {
-            home: '/tz-map-sync-state.json',
+            home: h,
             hash: hash,
             size: String(size),
             conflict: 'rewrite',
             api: '2',
             access_token: token
           });
-        }
-      ];
+        });
+      });
 
       function tryOne(i) {
         if (i >= attempts.length) {
-          return Promise.reject(new Error('mailru_file_add_failed'));
+          return Promise.reject(new Error('Не удалось зарегистрировать sync-state.json в папке «Синхронизация»'));
         }
         return attempts[i]().then(function (got) {
           if (got.ok) return got;
@@ -4451,11 +4548,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     }
 
     function mailruDirectReadDoc() {
-      const publicUrls = [
-        'https://cloclo53.cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME),
-        'https://cloclo51.cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME),
-        'https://cloud.mail.ru/public/' + MAILRU_WEBLINK + '/' + encodeURIComponent(MAILRU_SYNC_NAME)
-      ];
+      const publicUrls = mailruPublicSyncUrls();
       function tryUrl(i) {
         if (i >= publicUrls.length) {
           // Missing file is normal before the first successful write — not an error for writers.
@@ -4491,9 +4584,17 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           : localDoc;
         const payloadStr = JSON.stringify(merged);
         const bytes = mailruUtf8Bytes(payloadStr);
-        return mailruDirectUploadHash(token, bytes).then(function (fileHash) {
-          return mailruDirectFileAdd(token, fileHash, bytes.byteLength).then(function (addRes) {
-            return { merged: merged, addRes: addRes };
+        return mailruResolveFolderTargets(token).then(function (homes) {
+          return mailruDirectUploadHash(token, bytes).then(function (fileHash) {
+            return mailruDirectFileAdd(token, fileHash, bytes.byteLength, homes).then(function (addRes) {
+              // Success only if the public shared folder actually serves the file.
+              return mailruWaitPublicSyncFile(10).then(function (visible) {
+                if (!visible) {
+                  throw new Error('Запись в API прошла, но файла нет в папке «Синхронизация». Проверьте права rw и пароль приложения.');
+                }
+                return { merged: merged, addRes: addRes, verified: true };
+              });
+            });
           });
         });
       });
@@ -4611,10 +4712,10 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         if (passEl) passEl.value = '';
         if (syncApiOrigin()) publishApiOriginToJsonblob(syncApiOrigin());
         closeMailruModal();
-        showSyncToast('Mail.ru: вход выполнен · сохраняю файл синхронизации…', 'ok', 5000);
+        showSyncToast('Mail.ru: вход выполнен · сохраняю sync-state.json в «Синхронизация»…', 'ok', 5000);
         pushMailruSnapshot().then(function (ok) {
-          if (ok) showSyncToast('Файл sync-state.json записан в Облако Mail.ru', 'ok', 5000);
-          else showSyncToast('Вход ок, но загрузка в папку Mail.ru не удалась — попробуйте ещё раз или поставьте отметку', 'warn', 8000);
+          if (ok) showSyncToast('Файл sync-state.json появился в папке «Синхронизация» Mail.ru', 'ok', 6000);
+          else showSyncToast('Вход ок, но файл в папке Mail.ru не появился — нужен пароль приложения и права rw', 'warn', 9000);
         });
         pullSyncState();
         scheduleSyncPush();
@@ -5608,14 +5709,15 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
       return viaBothost().catch(function () {
         return mailruDirectWriteDoc(token, localDoc).then(function (result) {
-          // Prefer shared weblink; file/add fallback still counts as Mail.ru write.
-          return true;
+          return !!(result && result.verified);
         });
       }).catch(function (err) {
         const msg = (err && err.message) ? String(err.message) : '';
         if (/401|invalid|expired|token|password/i.test(msg)) {
           saveMailruSession(null);
           showSyncToast('Сессия Mail.ru истекла — войдите снова', 'warn', 5000);
+        } else if (msg && msg.length < 180) {
+          showSyncToast('Mail.ru: ' + msg, 'warn', 7000);
         }
         return false;
       });
