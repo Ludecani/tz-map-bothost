@@ -5740,16 +5740,56 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     map.createPane('markersPane');
     map.getPane('markersPane').style.zIndex = 650;
     coverageRenderer = L.canvas({ padding: 0.5, pane: 'coveragePane' });
-    const basemapOsm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
-    const basemapCarto = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', { maxZoom: 19, subdomains: 'abcd', attribution: '© OpenStreetMap © CARTO' });
-    let basemap = basemapOsm.addTo(map);
-    let basemapFallbackDone = false;
-    basemapOsm.on('tileerror', function () {
-      if (basemapFallbackDone) return;
-      basemapFallbackDone = true;
-      try { map.removeLayer(basemapOsm); } catch (e) {}
-      basemap = basemapCarto.addTo(map);
-    });
+    const basemapOpts = {
+      maxZoom: 19,
+      keepBuffer: 2,
+      updateWhenIdle: false,
+      updateWhenZooming: false,
+      crossOrigin: true
+    };
+    // Carto CDN first: OSM.org is often slow/blocked from RU desktops.
+    const basemapLayers = [
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', Object.assign({}, basemapOpts, {
+        subdomains: 'abcd',
+        attribution: '© OpenStreetMap © CARTO'
+      })),
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', Object.assign({}, basemapOpts, {
+        subdomains: 'abc',
+        attribution: '&copy; OpenStreetMap'
+      })),
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', Object.assign({}, basemapOpts, {
+        attribution: '© Esri'
+      }))
+    ];
+    let basemapIndex = 0;
+    let basemap = basemapLayers[0].addTo(map);
+    let basemapSwitching = false;
+    function switchBasemap(reason) {
+      if (basemapSwitching) return;
+      if (basemapIndex >= basemapLayers.length - 1) return;
+      basemapSwitching = true;
+      const prev = basemap;
+      basemapIndex += 1;
+      basemap = basemapLayers[basemapIndex].addTo(map);
+      try { map.removeLayer(prev); } catch (e) {}
+      basemapSwitching = false;
+      try { console.info('[basemap] switched to #' + basemapIndex + (reason ? ' (' + reason + ')' : '')); } catch (e) {}
+      watchBasemap(basemap);
+    }
+    function watchBasemap(layer) {
+      let gotTile = false;
+      let errors = 0;
+      layer.on('tileload', function () { gotTile = true; });
+      layer.on('tileerror', function () {
+        errors += 1;
+        if (!gotTile && errors >= 2) switchBasemap('tileerror');
+      });
+      // If no tile arrives at all (common when OSM.org hangs in RU), fail over quickly.
+      setTimeout(function () {
+        if (!gotTile) switchBasemap('timeout');
+      }, 2000);
+    }
+    watchBasemap(basemap);
     coverageLayer.addTo(map);
 
     // Start sync before heavy marker work so cloud fetch overlaps rendering.
