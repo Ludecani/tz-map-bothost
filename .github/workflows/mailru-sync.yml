@@ -45,11 +45,12 @@ jobs:
           if [ -n "${PASS}" ]; then echo "::add-mask::${PASS}"; fi
           if [ -n "${LOGIN}" ]; then echo "::add-mask::${LOGIN}"; fi
 
-          HAS_SECRET_LOGIN=0
-          HAS_SECRET_PASS=0
-          [ -n "${SECRET_LOGIN:-}" ] && HAS_SECRET_LOGIN=1
-          [ -n "${SECRET_PASSWORD:-}" ] && HAS_SECRET_PASS=1
-          echo "secrets_present login=${HAS_SECRET_LOGIN} password=${HAS_SECRET_PASS}"
+          LOGIN_LEN=${#SECRET_LOGIN}
+          PASS_LEN=${#SECRET_PASSWORD}
+          echo "secrets_diag login_len=${LOGIN_LEN} pass_len=${PASS_LEN} event=${GITHUB_EVENT_NAME}"
+          if [ "${LOGIN_LEN}" = "0" ] || [ "${PASS_LEN}" = "0" ]; then
+            echo "::warning::Secrets not visible to this job. Need Repository secrets (not Environment) named exactly MAILRU_LOGIN and MAILRU_PASSWORD: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions"
+          fi
 
           if [ -z "${LOGIN}" ] || [ -z "${PASS}" ]; then
             if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
