@@ -3889,6 +3889,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px;
       padding: 9px 10px; font-size: 14px;
     }
+    #mailru-modal .mailru-hint {
+      margin: 6px 0 0; font-size: 11px; color: #6b7280; line-height: 1.35;
+    }
     #mailru-modal .actions { display: flex; gap: 8px; margin-top: 14px; }
     #mailru-modal .actions button { flex: 1; min-height: 40px; font-weight: 600; }
     #mailru-modal #mailru-submit { background: #0f766e; color: #fff; border-color: #0f766e; }
@@ -4086,10 +4089,13 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <div id="mailru-modal" aria-hidden="true">
     <div class="box" role="dialog" aria-labelledby="mailru-title">
       <h2 id="mailru-title">Вход Mail.ru</h2>
-      <p>Нужен, чтобы сохранять отметки в общий файл на Облаке Mail.ru. Укажите адрес bothost-сервера карты (из панели bothost.ru, вида https://bot-….bothost.ru), затем почту и пароль. Пароль не сохраняется.</p>
-      <label for="mailru-api">Адрес сервера bothost</label>
-      <input id="mailru-api" type="url" placeholder="https://bot-XXXX.bothost.ru" autocomplete="off" />
-      <label for="mailru-login">Почта</label>
+      <p>Войдите почтой Mail.ru, чтобы карта могла писать общий файл <b>sync-state.json</b> в папку «Синхронизация». Пароль не сохраняется на устройстве.</p>
+      <div id="mailru-bot-wrap" style="display:none">
+        <label for="mailru-api">Ссылка бота bothost (один раз)</label>
+        <input id="mailru-api" type="url" placeholder="https://bot-XXXX.bothost.ru" autocomplete="off" />
+        <p class="mailru-hint">Это не API-ключ. В панели bothost.ru откройте бота с картой и скопируйте его адрес (https://bot-….bothost.ru). После первого входа поле больше не понадобится.</p>
+      </div>
+      <label for="mailru-login">Почта Mail.ru</label>
       <input id="mailru-login" type="email" autocomplete="username" placeholder="name@mail.ru" />
       <label for="mailru-password">Пароль</label>
       <input id="mailru-password" type="password" autocomplete="current-password" />
@@ -4188,6 +4194,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       }
     }
 
+    function mailruNeedsBotLink() {
+      if (syncHasLocalProxy()) return false;
+      return !syncApiOrigin();
+    }
+
     function openMailruModal() {
       const modal = document.getElementById('mailru-modal');
       if (!modal) return;
@@ -4195,15 +4206,24 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       modal.setAttribute('aria-hidden', 'false');
       const err = document.getElementById('mailru-err');
       if (err) { err.style.display = 'none'; err.textContent = ''; }
+      const botWrap = document.getElementById('mailru-bot-wrap');
       const apiInput = document.getElementById('mailru-api');
+      const needBot = mailruNeedsBotLink();
+      if (botWrap) botWrap.style.display = needBot ? '' : 'none';
       if (apiInput) {
-        apiInput.value = syncApiOrigin() || apiInput.value || '';
-        if (!apiInput.value && syncHasLocalProxy()) {
-          try { apiInput.value = location.origin.replace(/\/$/, ''); } catch (e) {}
+        if (syncHasLocalProxy()) {
+          try { apiInput.value = location.origin.replace(/\/$/, ''); } catch (e) { apiInput.value = syncApiOrigin() || ''; }
+        } else {
+          apiInput.value = syncApiOrigin() || apiInput.value || '';
         }
       }
       const login = document.getElementById('mailru-login');
-      if (login) setTimeout(function () { (apiInput && !apiInput.value ? apiInput : login).focus(); }, 50);
+      if (login) {
+        setTimeout(function () {
+          if (needBot && apiInput && !apiInput.value) apiInput.focus();
+          else login.focus();
+        }, 50);
+      }
     }
 
     function closeMailruModal() {
@@ -4221,28 +4241,40 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const passEl = document.getElementById('mailru-password');
       const errEl = document.getElementById('mailru-err');
       const submitBtn = document.getElementById('mailru-submit');
-      const apiRaw = (apiInput && apiInput.value ? apiInput.value : syncApiOrigin() || '').trim();
+      let apiRaw = (apiInput && apiInput.value ? apiInput.value : '').trim();
+      if (!apiRaw) apiRaw = syncApiOrigin() || '';
+      if (!apiRaw && syncHasLocalProxy()) {
+        try { apiRaw = location.origin.replace(/\/$/, ''); } catch (e) {}
+      }
       const login = (loginEl && loginEl.value || '').trim();
       const password = passEl ? passEl.value : '';
       if (!apiRaw) {
+        const botWrap = document.getElementById('mailru-bot-wrap');
+        if (botWrap) botWrap.style.display = '';
         if (errEl) {
           errEl.style.display = 'block';
-          errEl.textContent = 'Укажите адрес bothost (https://bot-….bothost.ru) из панели bothost.ru';
+          errEl.textContent = 'Один раз вставьте ссылку бота из bothost.ru (https://bot-….bothost.ru). Это не API-ключ.';
         }
+        if (apiInput) apiInput.focus();
         return;
       }
       if (!login || !password) {
-        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Укажите почту и пароль'; }
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Укажите почту и пароль Mail.ru'; }
         return;
       }
-      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Проверка…'; }
+      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Вход…'; }
       if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
 
       validateSyncApiOrigin(apiRaw).then(function (okOrigin) {
-        if (!okOrigin) throw new Error('Сервер bothost недоступен. Проверьте адрес (должен открываться /health → ok)');
+        if (!okOrigin) {
+          const botWrap = document.getElementById('mailru-bot-wrap');
+          if (botWrap) botWrap.style.display = '';
+          throw new Error('Ссылка бота не открывается. Проверьте адрес в bothost.ru (в браузере должно быть ok на /health)');
+        }
         rememberSyncApiOrigin(okOrigin);
         if (apiInput) apiInput.value = okOrigin;
-        if (submitBtn) submitBtn.textContent = 'Вход…';
+        const botWrap = document.getElementById('mailru-bot-wrap');
+        if (botWrap) botWrap.style.display = 'none';
         const base = okOrigin + '/api/mailru';
         return syncFetch(base + '/login', {
           method: 'POST',
