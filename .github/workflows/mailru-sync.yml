@@ -4,13 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       mailru_login:
-        description: "Почта Mail.ru (например rusakov_751@bk.ru)"
-        required: true
+        description: "Почта Mail.ru (оставьте пустым, если уже есть secret MAILRU_LOGIN)"
+        required: false
         type: string
+        default: ""
       mailru_password:
-        description: "Пароль для внешних приложений (НЕ обычный пароль). Лучше потом перенести в Secrets."
-        required: true
+        description: "Пароль приложения (оставьте пустым, если уже есть secret MAILRU_PASSWORD)"
+        required: false
         type: string
+        default: ""
   schedule:
     - cron: "*/10 * * * *"
   push:
@@ -35,26 +37,35 @@ jobs:
           SECRET_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
         run: |
           set -euo pipefail
-          # Read form inputs from event JSON (avoids printing password in the step env block).
+          # Form inputs override secrets when non-empty; otherwise use repository secrets.
           INPUT_LOGIN="$(python3 -c 'import json,os; e=json.load(open(os.environ["GITHUB_EVENT_PATH"])); print(((e.get("inputs") or {}).get("mailru_login") or "").strip())')"
           INPUT_PASSWORD="$(python3 -c 'import json,os; e=json.load(open(os.environ["GITHUB_EVENT_PATH"])); print(((e.get("inputs") or {}).get("mailru_password") or "").strip())')"
           LOGIN="${INPUT_LOGIN:-${SECRET_LOGIN:-}}"
           PASS="${INPUT_PASSWORD:-${SECRET_PASSWORD:-}}"
           if [ -n "${PASS}" ]; then echo "::add-mask::${PASS}"; fi
           if [ -n "${LOGIN}" ]; then echo "::add-mask::${LOGIN}"; fi
+
+          HAS_SECRET_LOGIN=0
+          HAS_SECRET_PASS=0
+          [ -n "${SECRET_LOGIN:-}" ] && HAS_SECRET_LOGIN=1
+          [ -n "${SECRET_PASSWORD:-}" ] && HAS_SECRET_PASS=1
+          echo "secrets_present login=${HAS_SECRET_LOGIN} password=${HAS_SECRET_PASS}"
+
           if [ -z "${LOGIN}" ] || [ -z "${PASS}" ]; then
             if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-              echo "::error::Нужны почта и пароль приложения в форме Run workflow."
+              echo "::error::Нет учётных данных. Добавьте Repository secrets MAILRU_LOGIN и MAILRU_PASSWORD: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions — или заполните поля формы Run workflow."
               exit 1
             fi
-            echo "::notice::Пропуск: нет MAILRU_LOGIN/MAILRU_PASSWORD. Для загрузки запустите Run workflow и заполните форму."
+            echo "::notice::Пропуск: нет MAILRU_LOGIN/MAILRU_PASSWORD. Добавьте secrets или запустите Run workflow с формой."
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           echo "skip=false" >> "${GITHUB_OUTPUT}"
-          if [ -n "${INPUT_LOGIN}" ]; then
-            echo "Источник: форма Run workflow"
-            echo "::warning::Пароль из формы может сохраниться в логах GitHub. Смените пароль приложения после успешной загрузки и перенесите его в Repository secrets."
+          if [ -n "${INPUT_PASSWORD}" ] || [ -n "${INPUT_LOGIN}" ]; then
+            echo "Источник: форма Run workflow (перекрывает secrets при непустых полях)"
+            if [ -z "${SECRET_PASSWORD:-}" ]; then
+              echo "::notice::После успеха добавьте MAILRU_LOGIN и MAILRU_PASSWORD в Repository secrets, чтобы schedule/push работали без формы."
+            fi
           else
             echo "Источник: repository secrets"
           fi
