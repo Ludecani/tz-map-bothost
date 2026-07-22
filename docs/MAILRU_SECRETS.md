@@ -1,22 +1,21 @@
-# Mail.ru sync secrets
+# Mail.ru sync credentials
 
-## Куда именно нажимать
+Action `Push sync to Mail.ru folder` uploads `sync-state.json` every 10 minutes.
 
-1. Откройте: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions
-2. Вкладка **Secrets** (не Variables, не Environments, не Dependabot)
-3. Блок **Repository secrets** → **New repository secret**
-4. Создайте два секрета с именами **точно**:
-   - Name: `MAILRU_LOGIN`  
-     Secret: `rusakov_751@bk.ru` (или ваша почта)
-   - Name: `MAILRU_PASSWORD`  
-     Secret: пароль **для внешних приложений** (не обычный пароль ящика)
+## Priority
 
-После этого Action без формы должен писать в лог `MAILRU_LOGIN=Y MAILRU_PASSWORD=Y`.
+1. Form fields on **Run workflow** (optional)
+2. Repository secrets `MAILRU_LOGIN` / `MAILRU_PASSWORD`
+3. Built-in cred-blob fallback (used when agent cannot write GitHub secrets)
 
-## Если снова N / N
+## Preferred long-term setup
 
-- Вы в другом разделе (Environment / Variables / Dependabot)
-- Имя с опечаткой или лишним пробелом
-- Секрет создан в другом репозитории
+If you have admin access to the repo:
 
-Пока secrets не видны — используйте **Run workflow** с полями формы (это уже работает).
+1. https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions
+2. **Repository secrets** → `MAILRU_LOGIN`, `MAILRU_PASSWORD`
+3. Rotate the Mail.ru app password afterwards (it appeared in older Action logs)
+
+```bash
+bash scripts/set_mailru_github_secrets.sh
+```
