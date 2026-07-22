@@ -4755,14 +4755,16 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         return syncFetchOne(readUrl, {
           method: 'GET',
           headers: { 'Accept': 'application/json' },
-          timeout: 2500,
+          timeout: SYNC_SAVE_MS,
           retries: 1
         }).then(function (res) {
           return res.json();
-        }).catch(function () {
-          return {};
         }).then(function (remote) {
-          const roomDoc = (remote && typeof remote === 'object') ? Object.assign({}, remote) : {};
+          if (!remote || typeof remote !== 'object') {
+            // Failed/invalid GET — never POST a local-only room doc (would erase colleagues).
+            return false;
+          }
+          const roomDoc = Object.assign({}, remote);
           roomDoc.v = 3;
           roomDoc.updatedAt = Date.now();
           data.forEach(function (item) {
@@ -4784,13 +4786,19 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
             const prevAt = prev && prev.at ? Number(prev.at) || 0 : 0;
             if (!prev || (Number(next.at) || 0) >= prevAt) roomDoc[key] = next;
           });
+          // Also store compact snapshot for devices that cannot reach jsonblob.
+          try {
+            roomDoc._compact = buildCompactDoc();
+          } catch (e) {}
           return syncFetchOne(url, {
             method: 'POST',
             headers: syncWriteHeaders(),
             body: JSON.stringify(roomDoc),
-            timeout: 2500,
+            timeout: SYNC_SAVE_MS,
             retries: 1
           }).then(function () { return true; });
+        }).catch(function () {
+          return false;
         });
       } catch (e) {
         return Promise.resolve(false);
@@ -4798,16 +4806,17 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     }
 
     function pushMantleMarksBackground(ids) {
-      if (!ids || !ids.length) return;
+      if (!ids || !ids.length) return Promise.resolve(false);
       const headers = syncWriteHeaders();
-      ids.slice(0, 8).forEach(function (id) {
+      const jobs = ids.slice(0, 12).map(function (id) {
         const key = markKey(id);
         const st = getWorkStatus(id);
         const url = syncMarkUrl(syncRoom, key, true);
         const m = completedMeta[id];
         if (st === 'none') {
-          syncFetchOne(url, { method: 'DELETE', headers: headers, timeout: 2000, retries: 1 }).catch(function () {});
-          return;
+          return syncFetchOne(url, { method: 'DELETE', headers: headers, timeout: 3500, retries: 1 })
+            .then(function () { return true; })
+            .catch(function () { return false; });
         }
         const body = JSON.stringify({
           status: st,
@@ -4816,7 +4825,12 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           at: (m && m.at) || Date.now(),
           id: id
         });
-        syncFetchOne(url, { method: 'POST', headers: headers, body: body, timeout: 2000, retries: 1 }).catch(function () {});
+        return syncFetchOne(url, { method: 'POST', headers: headers, body: body, timeout: 3500, retries: 1 })
+          .then(function () { return true; })
+          .catch(function () { return false; });
+      });
+      return Promise.all(jobs).then(function (results) {
+        return results.some(function (ok) { return !!ok; });
       });
     }
 
@@ -4909,15 +4923,23 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       rememberOutboxIds(allIds);
       setSyncStatus('сохранение…', 'warn');
 
-      // jsonblob is the shared source of truth for all devices; Mantle is best-effort only.
+      // Dual channel: jsonblob preferred, Mantle is a full fallback when blob is blocked/unreachable.
       const blobP = pushJsonblobSnapshot().catch(function () { return false; });
-      // Kick Mantle in parallel, but never treat it as enough to clear the outbox.
-      pushMantleRoomSnapshot().catch(function () { return false; });
-      pushMantleMarksBackground(allIds);
+      const roomP = pushMantleRoomSnapshot().catch(function () { return false; });
+      const marksP = pushMantleMarksBackground(allIds).catch(function () { return false; });
 
-      return blobP.then(function (ok) {
-        if (ok) {
+      return Promise.all([blobP, roomP, marksP]).then(function (results) {
+        const blobOk = !!results[0];
+        const roomOk = !!results[1];
+        const marksOk = !!results[2];
+        if (blobOk || roomOk || marksOk) {
           finishLocalCloudSave(allIds);
+          if (!blobOk) {
+            // Keep trying jsonblob in background so peers that only read blob still catch up later.
+            setTimeout(function () {
+              pushJsonblobSnapshot().catch(function () { return false; });
+            }, 2500);
+          }
           return true;
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
@@ -4992,7 +5014,8 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     function syncFetchOne(url, opts) {
       opts = opts || {};
-      return syncFetch(url, {
+      // Prefer syncCloudFetch so local/bothost proxy failures fall back to direct Mantle.
+      return syncCloudFetch(url, {
         method: opts.method,
         headers: opts.headers,
         body: opts.body,
@@ -5063,7 +5086,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         }).then(function (doc) {
           if (!doc || typeof doc !== 'object') throw new Error('bad room');
           syncLastRemoteDoc = doc;
-          return { items: remoteDocToItems(doc), complete: true, source: 'mantle' };
+          const items = remoteDocToItems(doc);
+          if (doc._compact) mergeItemMaps(items, itemsFromCompactDoc(doc._compact));
+          return { items: items, complete: true, source: 'mantle' };
         });
       }
 
