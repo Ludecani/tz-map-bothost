@@ -5,7 +5,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <meta name="tz-map-build" content="2026-07-22T09:45Z" />
+  <meta name="tz-map-build" content="2026-07-22T10:30Z" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -4009,7 +4009,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
-      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.09:45</span>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.10:30</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -4856,7 +4856,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     const DIRTY_SYNC_MS = 300000;
     const SYNC_FETCH_MS = 10000;
     const SYNC_FETCH_RETRIES = 2;
-    const SYNC_PULL_FAST_MS = 4000;
+    const SYNC_PULL_FAST_MS = 8000;
     const SYNC_PULL_SLOW_MS = 9000;
     const SYNC_SAVE_MS = 7000;
 
@@ -5912,15 +5912,19 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         const blobOk = !!results[2];
         const roomOk = !!results[3];
         const marksOk = !!results[4];
-        // Only shared stores count as a real cloud save. Mantle alone is often blocked
-        // and previously caused a false «сохранено» while colleagues saw nothing.
-        const authoritativeOk = mailruOk || bothostOk || blobOk;
+        // jsonblob is the shared source of truth for colleagues. Mail.ru/bothost are mirrors.
+        // Mantle alone is often blocked and previously caused a false «сохранено».
+        const authoritativeOk = blobOk || bothostOk || mailruOk;
         if (authoritativeOk) {
           finishLocalCloudSave(allIds);
           if (!blobOk) {
+            // Heal: keep retrying jsonblob so the other PC can see marks even if Mail.ru lagged.
             setTimeout(function () {
               pushJsonblobSnapshot().catch(function () { return false; });
-            }, 2500);
+            }, 800);
+            setTimeout(function () {
+              pushJsonblobSnapshot().catch(function () { return false; });
+            }, 3500);
           }
           return true;
         }
@@ -6229,12 +6233,18 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           });
           if (any) {
             const src = gotBlob ? 'jsonblob' : (gotBothost ? 'bothost' : (gotMailru ? 'mailru' : (hasLive ? 'mantle' : 'pages')));
-            // Never prune from Mail.ru alone unless it actually had content (handled upstream).
-            // Prefer jsonblob/bothost as authoritative prune sources.
+            // Prune ONLY when jsonblob (shared source of truth) was read.
+            // Mail.ru alone can lag behind and previously wiped colleagues' newer marks.
             applyPullResult(
               { items: merged, complete: gotMailru || gotBothost || gotBlob || hasLive, source: src },
-              { prune: gotBothost || gotBlob || gotMailru, persist: true }
+              { prune: gotBlob, persist: true }
             );
+            // Heal split-brain: push the union (local + all remotes) back to jsonblob.
+            if (!syncPushInFlight) {
+              setTimeout(function () {
+                pushJsonblobSnapshot().catch(function () { return false; });
+              }, 700);
+            }
           }
           return true;
         });
