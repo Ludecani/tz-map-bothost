@@ -33,42 +33,66 @@ jobs:
       - name: Resolve credentials
         id: creds
         env:
-          SECRET_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
-          SECRET_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
+          # Read each candidate separately (avoid || short-circuit surprises).
+          S_MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN }}
+          S_MAILRU_EMAIL: ${{ secrets.MAILRU_EMAIL }}
+          S_MAIL_LOGIN: ${{ secrets.MAIL_LOGIN }}
+          S_MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD }}
+          S_MAILRU_PASS: ${{ secrets.MAILRU_PASS }}
+          S_MAILRU_APP_PASSWORD: ${{ secrets.MAILRU_APP_PASSWORD }}
+          S_MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          V_MAILRU_LOGIN: ${{ vars.MAILRU_LOGIN }}
+          V_MAILRU_PASSWORD: ${{ vars.MAILRU_PASSWORD }}
         run: |
           set -euo pipefail
-          # Form inputs override secrets when non-empty; otherwise use repository secrets.
+          pick() {
+            for v in "$@"; do
+              if [ -n "${v}" ]; then
+                printf '%s' "${v}"
+                return 0
+              fi
+            done
+            printf ''
+          }
+
           INPUT_LOGIN="$(python3 -c 'import json,os; e=json.load(open(os.environ["GITHUB_EVENT_PATH"])); print(((e.get("inputs") or {}).get("mailru_login") or "").strip())')"
           INPUT_PASSWORD="$(python3 -c 'import json,os; e=json.load(open(os.environ["GITHUB_EVENT_PATH"])); print(((e.get("inputs") or {}).get("mailru_password") or "").strip())')"
-          LOGIN="${INPUT_LOGIN:-${SECRET_LOGIN:-}}"
-          PASS="${INPUT_PASSWORD:-${SECRET_PASSWORD:-}}"
+
+          SECRET_LOGIN="$(pick "${S_MAILRU_LOGIN:-}" "${S_MAILRU_EMAIL:-}" "${S_MAIL_LOGIN:-}" "${V_MAILRU_LOGIN:-}")"
+          SECRET_PASSWORD="$(pick "${S_MAILRU_PASSWORD:-}" "${S_MAILRU_PASS:-}" "${S_MAILRU_APP_PASSWORD:-}" "${S_MAIL_PASSWORD:-}" "${V_MAILRU_PASSWORD:-}")"
+
+          LOGIN="$(pick "${INPUT_LOGIN:-}" "${SECRET_LOGIN:-}")"
+          PASS="$(pick "${INPUT_PASSWORD:-}" "${SECRET_PASSWORD:-}")"
+
           if [ -n "${PASS}" ]; then echo "::add-mask::${PASS}"; fi
           if [ -n "${LOGIN}" ]; then echo "::add-mask::${LOGIN}"; fi
 
-          LOGIN_LEN=${#SECRET_LOGIN}
-          PASS_LEN=${#SECRET_PASSWORD}
-          echo "secrets_diag login_len=${LOGIN_LEN} pass_len=${PASS_LEN} event=${GITHUB_EVENT_NAME}"
-          if [ "${LOGIN_LEN}" = "0" ] || [ "${PASS_LEN}" = "0" ]; then
-            echo "::warning::Secrets not visible to this job. Need Repository secrets (not Environment) named exactly MAILRU_LOGIN and MAILRU_PASSWORD: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions"
-          fi
+          echo "secrets_diag names present:" \
+            "MAILRU_LOGIN=$([ -n "${S_MAILRU_LOGIN:-}" ] && echo Y || echo N)" \
+            "MAILRU_EMAIL=$([ -n "${S_MAILRU_EMAIL:-}" ] && echo Y || echo N)" \
+            "MAIL_LOGIN=$([ -n "${S_MAIL_LOGIN:-}" ] && echo Y || echo N)" \
+            "MAILRU_PASSWORD=$([ -n "${S_MAILRU_PASSWORD:-}" ] && echo Y || echo N)" \
+            "MAILRU_PASS=$([ -n "${S_MAILRU_PASS:-}" ] && echo Y || echo N)" \
+            "MAILRU_APP_PASSWORD=$([ -n "${S_MAILRU_APP_PASSWORD:-}" ] && echo Y || echo N)" \
+            "MAIL_PASSWORD=$([ -n "${S_MAIL_PASSWORD:-}" ] && echo Y || echo N)" \
+            "vars.MAILRU_LOGIN=$([ -n "${V_MAILRU_LOGIN:-}" ] && echo Y || echo N)" \
+            "vars.MAILRU_PASSWORD=$([ -n "${V_MAILRU_PASSWORD:-}" ] && echo Y || echo N)" \
+            "event=${GITHUB_EVENT_NAME}"
 
           if [ -z "${LOGIN}" ] || [ -z "${PASS}" ]; then
             if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-              echo "::error::Нет учётных данных. Добавьте Repository secrets MAILRU_LOGIN и MAILRU_PASSWORD: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions — или заполните поля формы Run workflow."
+              echo "::error::Нет учётных данных. Settings → Secrets and variables → Actions → Secrets → New repository secret → MAILRU_LOGIN и MAILRU_PASSWORD. Или заполните форму Run workflow."
               exit 1
             fi
-            echo "::notice::Пропуск: нет MAILRU_LOGIN/MAILRU_PASSWORD. Добавьте secrets или запустите Run workflow с формой."
+            echo "::notice::Пропуск: repository secrets пустые. Форма Run workflow по-прежнему работает."
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           echo "skip=false" >> "${GITHUB_OUTPUT}"
           if [ -n "${INPUT_PASSWORD}" ] || [ -n "${INPUT_LOGIN}" ]; then
-            echo "Источник: форма Run workflow (перекрывает secrets при непустых полях)"
-            if [ -z "${SECRET_PASSWORD:-}" ]; then
-              echo "::notice::После успеха добавьте MAILRU_LOGIN и MAILRU_PASSWORD в Repository secrets, чтобы schedule/push работали без формы."
-            fi
+            echo "Источник: форма Run workflow"
           else
-            echo "Источник: repository secrets"
+            echo "Источник: repository secrets/vars"
           fi
           {
             echo "MAILRU_LOGIN<<EOF"
@@ -86,7 +110,3 @@ jobs:
           MAILRU_WEBLINK: ${{ secrets.MAILRU_WEBLINK }}
           MAILRU_SYNC_NAME: ${{ secrets.MAILRU_SYNC_NAME }}
         run: python3 scripts/push_mailru_sync.py
-
-# secrets check 2026-07-22T10:03Z
-
-# recheck secrets 2026-07-22T10:07Z
