@@ -129,72 +129,108 @@ def upload_hash(token: str, content: bytes) -> str:
     raise SystemExit("upload_failed")
 
 
-def form_post(path: str, form: dict) -> tuple[int, dict]:
+def form_post(path: str, form: dict, access_token: str | None = None) -> tuple[int, dict, str]:
     data = urllib.parse.urlencode(form).encode()
+    url = API + path
+    if access_token:
+        join = "&" if "?" in url else "?"
+        url = f"{url}{join}access_token={urllib.parse.quote(access_token)}"
     st, raw, _ = http(
-        API + path,
+        url,
         method="POST",
         data=data,
         headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
     )
+    text = raw.decode("utf-8", "replace")
     try:
-        doc = json.loads(raw.decode("utf-8", "replace"))
+        doc = json.loads(text)
     except Exception:
-        doc = {"raw": raw[:300].decode("utf-8", "replace")}
-    return st, doc
+        doc = {"raw": text[:300]}
+    return st, doc, text[:300]
 
 
-def register(token: str, file_hash: str, size: int, weblink: str, name: str) -> None:
-    homes = []
+def discover_homes(token: str, weblink: str, name: str) -> list[str]:
+    homes: list[str] = []
+
+    def add(path: str) -> None:
+        path = str(path or "").strip()
+        if not path:
+            return
+        if not path.startswith("/"):
+            path = "/" + path
+        if path not in homes:
+            homes.append(path)
+
+    # Public weblink metadata (often includes real home for the owner).
     st, raw, _ = http(
         f"{API}/folder?weblink={urllib.parse.quote('/' + weblink)}&access_token={urllib.parse.quote(token)}"
     )
+    print(f"folder(weblink) status={st}")
     if st == 200:
         try:
             body = json.loads(raw.decode("utf-8", "replace")).get("body") or {}
+            print("folder(weblink) keys", sorted(body.keys()))
             if body.get("home"):
-                homes.append(str(body["home"]).rstrip("/") + "/" + name)
+                add(str(body["home"]).rstrip("/") + "/" + name)
             if body.get("name"):
-                homes.append("/" + str(body["name"]) + "/" + name)
-        except Exception:
-            pass
-    homes.extend(
-        [
-            f"/{weblink}/{name}",
-            f"/Синхронизация/{name}",
-        ]
-    )
+                add("/" + str(body["name"]) + "/" + name)
+        except Exception as e:
+            print("folder(weblink) parse err", e)
 
-    attempts = [
-        ("/weblinks/file/add", {
-            "weblink": f"/{weblink}/{name}",
+    # Scan account root for folder named Синхронизация / matching weblink.
+    st, raw, _ = http(
+        f"{API}/folder?home={urllib.parse.quote('/')}&access_token={urllib.parse.quote(token)}&limit=500"
+    )
+    print(f"folder(home=/) status={st}")
+    if st == 200:
+        try:
+            body = json.loads(raw.decode("utf-8", "replace")).get("body") or {}
+            for item in body.get("list") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_home = str(item.get("home") or "")
+                item_name = str(item.get("name") or "")
+                item_wl = str(item.get("weblink") or "")
+                if item_wl.replace("/", "") == weblink.replace("/", "") or item_name == "Синхронизация":
+                    print("matched folder", item_name, item_home, item_wl)
+                    if item_home:
+                        add(item_home.rstrip("/") + "/" + name)
+                    if item_name:
+                        add("/" + item_name + "/" + name)
+        except Exception as e:
+            print("folder(home=/) parse err", e)
+
+    add(f"/Синхронизация/{name}")
+    add(f"/{weblink}/{name}")
+    return homes
+
+
+def register(token: str, file_hash: str, size: int, weblink: str, name: str) -> None:
+    homes = discover_homes(token, weblink, name)
+    print("home candidates", homes)
+
+    attempts: list[tuple[str, dict]] = []
+    # Shared-folder API variants (token in query string).
+    for weblink_val in (
+        f"/{weblink}/{name}",
+        f"{weblink}/{name}",
+        f"/{weblink}/",
+        weblink,
+        f"/{weblink}",
+    ):
+        form = {
+            "weblink": weblink_val,
             "hash": file_hash,
             "size": str(size),
             "conflict": "rewrite",
             "upload_type": "manual",
             "api": "2",
-            "access_token": token,
             "platform": "desktop_web",
-        }),
-        ("/weblinks/file/add", {
-            "weblink": f"{weblink}/{name}",
-            "hash": file_hash,
-            "size": str(size),
-            "conflict": "rewrite",
-            "upload_type": "manual",
-            "api": "2",
-            "access_token": token,
-        }),
-        ("/weblinks/file/add", {
-            "weblink": f"/{weblink}/",
-            "name": name,
-            "hash": file_hash,
-            "size": str(size),
-            "conflict": "rewrite",
-            "api": "2",
-            "access_token": token,
-        }),
-    ]
+        }
+        if weblink_val.endswith("/"):
+            form["name"] = name
+        attempts.append(("/weblinks/file/add", form))
+
     for home in homes:
         attempts.append(
             (
@@ -205,17 +241,39 @@ def register(token: str, file_hash: str, size: int, weblink: str, name: str) -> 
                     "size": str(size),
                     "conflict": "rewrite",
                     "api": "2",
-                    "access_token": token,
+                },
+            )
+        )
+        # Some clients also send token in form as `token`.
+        attempts.append(
+            (
+                "/file/add",
+                {
+                    "home": home,
+                    "hash": file_hash,
+                    "size": str(size),
+                    "conflict": "rewrite",
+                    "api": "2",
+                    "token": token,
                 },
             )
         )
 
     last = None
     for path, form in attempts:
-        st, doc = form_post(path, form)
+        # Primary: access_token as query param (OAuth / cloud-win).
+        st, doc, raw = form_post(path, {k: v for k, v in form.items() if k != "token"}, access_token=token)
+        print(f"try {path} q-token -> {st} {doc if isinstance(doc, dict) else raw}")
         last = (st, doc)
         if st == 200 or (isinstance(doc, dict) and doc.get("status") == 200):
             return
+        # Secondary: form field token= (web CSRF style) without query auth.
+        if "token" in form:
+            st2, doc2, raw2 = form_post(path, form, access_token=None)
+            print(f"try {path} form-token -> {st2} {doc2 if isinstance(doc2, dict) else raw2}")
+            last = (st2, doc2)
+            if st2 == 200 or (isinstance(doc2, dict) and doc2.get("status") == 200):
+                return
     raise SystemExit(f"register_failed:{last}")
 
 

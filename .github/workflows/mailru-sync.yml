@@ -8,11 +8,10 @@ on:
         required: true
         type: string
       mailru_password:
-        description: "Пароль для внешних приложений (не обычный пароль почты)"
+        description: "Пароль для внешних приложений (НЕ обычный пароль). Лучше потом перенести в Secrets."
         required: true
         type: string
   schedule:
-    # Needs repository secrets MAILRU_LOGIN + MAILRU_PASSWORD.
     - cron: "*/10 * * * *"
   push:
     branches: [main]
@@ -33,31 +32,33 @@ jobs:
         env:
           SECRET_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
           SECRET_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
-          INPUT_LOGIN: ${{ inputs.mailru_login }}
-          INPUT_PASSWORD: ${{ inputs.mailru_password }}
         run: |
-          LOGIN="${INPUT_LOGIN:-$SECRET_LOGIN}"
-          PASS="${INPUT_PASSWORD:-$SECRET_PASSWORD}"
-          if [ -n "$PASS" ]; then
-            echo "::add-mask::$PASS"
-          fi
-          if [ -n "$LOGIN" ]; then
-            echo "::add-mask::$LOGIN"
-          fi
-          if [ -z "$LOGIN" ] || [ -z "$PASS" ]; then
-            echo "::error::Нужны почта и пароль приложения. Запустите workflow вручную и заполните оба поля формы."
-            echo "Форма: https://github.com/Ludecani/tz-map-bothost/actions/workflows/mailru-sync.yml"
+          set -euo pipefail
+          # Read form inputs from event JSON (avoids printing password in the step env block).
+          INPUT_LOGIN="$(python3 -c 'import json,os; e=json.load(open(os.environ["GITHUB_EVENT_PATH"])); print(((e.get("inputs") or {}).get("mailru_login") or "").strip())')"
+          INPUT_PASSWORD="$(python3 -c 'import json,os; e=json.load(open(os.environ["GITHUB_EVENT_PATH"])); print(((e.get("inputs") or {}).get("mailru_password") or "").strip())')"
+          LOGIN="${INPUT_LOGIN:-${SECRET_LOGIN:-}}"
+          PASS="${INPUT_PASSWORD:-${SECRET_PASSWORD:-}}"
+          if [ -n "${PASS}" ]; then echo "::add-mask::${PASS}"; fi
+          if [ -n "${LOGIN}" ]; then echo "::add-mask::${LOGIN}"; fi
+          if [ -z "${LOGIN}" ] || [ -z "${PASS}" ]; then
+            echo "::error::Нужны почта и пароль приложения в форме Run workflow."
             exit 1
           fi
-          if [ -n "$INPUT_LOGIN" ]; then
+          if [ -n "${INPUT_LOGIN}" ]; then
             echo "Источник: форма Run workflow"
+            echo "::warning::Пароль из формы может сохраниться в логах GitHub. Смените пароль приложения после успешной загрузки и перенесите его в Repository secrets."
           else
             echo "Источник: repository secrets"
           fi
           {
-            echo "MAILRU_LOGIN=$LOGIN"
-            echo "MAILRU_PASSWORD=$PASS"
-          } >> "$GITHUB_ENV"
+            echo "MAILRU_LOGIN<<EOF"
+            echo "${LOGIN}"
+            echo "EOF"
+            echo "MAILRU_PASSWORD<<EOF"
+            echo "${PASS}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
 
       - name: Upload sync-state.json to Mail.ru shared folder
         env:
