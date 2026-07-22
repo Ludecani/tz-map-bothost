@@ -3899,6 +3899,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     #mailru-modal .mailru-hint {
       margin: 6px 0 0; font-size: 11px; color: #6b7280; line-height: 1.35;
     }
+    #mailru-modal .mailru-hint a { color: #0f766e; }
     #mailru-modal .actions { display: flex; gap: 8px; margin-top: 14px; }
     #mailru-modal .actions button { flex: 1; min-height: 40px; font-weight: 600; }
     #mailru-modal #mailru-submit { background: #0f766e; color: #fff; border-color: #0f766e; }
@@ -4007,7 +4008,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
-      <span id="build-stamp" class="build-stamp" title="Версия live-карты">v22.07.08:10</span>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты">v22.07.08:20</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -4097,11 +4098,12 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <div id="mailru-modal" aria-hidden="true">
     <div class="box" role="dialog" aria-labelledby="mailru-title">
       <h2 id="mailru-title">Вход Mail.ru</h2>
-      <p>Войдите почтой и паролем Mail.ru — карта запишет общий файл <b>sync-state.json</b> в папку «Синхронизация». Пароль на устройстве не сохраняется.</p>
+      <p>Карта запишет общий файл <b>sync-state.json</b> в папку «Синхронизация». Обычный пароль от почты <b>не подойдёт</b> — нужен пароль для внешних приложений. На устройстве он не сохраняется.</p>
       <label for="mailru-login">Почта Mail.ru</label>
       <input id="mailru-login" type="email" autocomplete="username" placeholder="name@mail.ru" />
-      <label for="mailru-password">Пароль</label>
-      <input id="mailru-password" type="password" autocomplete="current-password" />
+      <label for="mailru-password">Пароль для внешних приложений</label>
+      <input id="mailru-password" type="password" autocomplete="current-password" placeholder="не обычный пароль от почты" />
+      <p class="mailru-hint">Создать: Настройки → Безопасность → <a href="https://account.mail.ru/user/2-step-auth/passwords/" target="_blank" rel="noopener noreferrer">Пароли для внешних приложений</a> (нужен привязанный телефон). Права: доступ к Облаку / полный доступ.</p>
       <div id="mailru-err"></div>
       <div class="actions">
         <button type="button" id="mailru-cancel">Отмена</button>
@@ -4136,27 +4138,75 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     let mailruSession = null;
     let mailruCorsProxyIdx = 0;
 
-    function mailruCorsWrap(url) {
-      const base = MAILRU_CORS_PROXIES[mailruCorsProxyIdx % MAILRU_CORS_PROXIES.length];
+    function mailruCorsWrap(url, idx) {
+      const base = MAILRU_CORS_PROXIES[(idx == null ? mailruCorsProxyIdx : idx) % MAILRU_CORS_PROXIES.length];
       if (base.indexOf('?') >= 0 && base.slice(-1) === '?') return base + encodeURIComponent(url);
       return base + url;
+    }
+
+    function mailruLooksLikeProxyFailure(res, txt) {
+      if (!res) return true;
+      const ct = String((res.headers && res.headers.get && res.headers.get('content-type')) || '').toLowerCase();
+      const body = String(txt || '');
+      if (res.status === 1010 || res.status === 520 || res.status === 521 || res.status === 522) return true;
+      if (ct.indexOf('text/html') >= 0 && body.indexOf('{') !== 0) return true;
+      if (/cloudflare|error code:\s*1010|access denied|just a moment/i.test(body)) return true;
+      return false;
     }
 
     function mailruDirectFetch(url, opts) {
       opts = opts || {};
       const timeoutMs = opts.timeout || 20000;
+      const maxTries = Math.max(1, Number(opts.proxyTries) || MAILRU_CORS_PROXIES.length);
       const fetchOpts = Object.assign({}, opts);
       delete fetchOpts.timeout;
       delete fetchOpts.retries;
-      const ctrl = new AbortController();
-      const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
-      return fetch(mailruCorsWrap(url), Object.assign({}, fetchOpts, { signal: ctrl.signal }))
-        .finally(function () { clearTimeout(timer); })
-        .catch(function (err) {
-          // Rotate proxy once on hard network failure.
-          mailruCorsProxyIdx = (mailruCorsProxyIdx + 1) % MAILRU_CORS_PROXIES.length;
-          throw err;
-        });
+      delete fetchOpts.proxyTries;
+
+      function attempt(tryNo) {
+        const idx = (mailruCorsProxyIdx + tryNo) % MAILRU_CORS_PROXIES.length;
+        const ctrl = new AbortController();
+        const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+        return fetch(mailruCorsWrap(url, idx), Object.assign({}, fetchOpts, { signal: ctrl.signal, mode: 'cors' }))
+          .finally(function () { clearTimeout(timer); })
+          .then(function (res) {
+            // Peek clone only when status suggests a dead proxy page.
+            if (res.ok || (res.status !== 403 && res.status !== 502 && res.status !== 503 && res.status < 520)) {
+              mailruCorsProxyIdx = idx;
+              return res;
+            }
+            return res.clone().text().then(function (txt) {
+              if (mailruLooksLikeProxyFailure(res, txt) && tryNo + 1 < maxTries) {
+                return attempt(tryNo + 1);
+              }
+              mailruCorsProxyIdx = idx;
+              return res;
+            });
+          })
+          .catch(function (err) {
+            if (tryNo + 1 < maxTries) return attempt(tryNo + 1);
+            mailruCorsProxyIdx = (mailruCorsProxyIdx + 1) % MAILRU_CORS_PROXIES.length;
+            const name = (err && err.name) || '';
+            if (name === 'AbortError') throw new Error('Таймаут связи с Mail.ru. Проверьте интернет и попробуйте ещё раз.');
+            throw new Error('Нет связи с Mail.ru (блокировка сети или CORS-прокси). Попробуйте другую сеть / VPN или bothost.');
+          });
+      }
+      return attempt(0);
+    }
+
+    function mailruTranslateAuthError(raw) {
+      const s = String(raw || '').trim();
+      const low = s.toLowerCase();
+      if (!s || /invalid username or password|username or password is incorrect|invalid_grant|error_code.:3/.test(low)) {
+        return 'Неверный логин или пароль. Нужен пароль для внешних приложений (не обычный пароль от почты).';
+      }
+      if (/invalid client|bad client/.test(low)) {
+        return 'Ошибка клиента авторизации Mail.ru. Обновите страницу и попробуйте снова.';
+      }
+      if (/proxy|cors|failed to fetch|network|связь|таймаут|timeout|blocked/i.test(low)) {
+        return s;
+      }
+      return s;
     }
 
     function mailruDirectLogin(login, password) {
@@ -4166,19 +4216,43 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         username: login,
         password: password
       }).toString();
-      return mailruDirectFetch(MAILRU_OAUTH_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: body,
-        timeout: 25000
-      }).then(function (res) {
-        return res.json().then(function (data) {
-          return { ok: res.ok, data: data };
+
+      function postOauth(tryNo) {
+        const idx = (mailruCorsProxyIdx + tryNo) % MAILRU_CORS_PROXIES.length;
+        const ctrl = new AbortController();
+        const timer = setTimeout(function () { ctrl.abort(); }, 25000);
+        return fetch(mailruCorsWrap(MAILRU_OAUTH_URL, idx), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+          body: body,
+          mode: 'cors',
+          signal: ctrl.signal
+        }).finally(function () { clearTimeout(timer); }).then(function (res) {
+          return res.text().then(function (txt) {
+            if (mailruLooksLikeProxyFailure(res, txt)) {
+              if (tryNo + 1 < MAILRU_CORS_PROXIES.length) return postOauth(tryNo + 1);
+              throw new Error('Прокси до Mail.ru недоступен. Попробуйте другую сеть / VPN.');
+            }
+            let data = null;
+            try { data = JSON.parse(txt); } catch (e) {
+              if (tryNo + 1 < MAILRU_CORS_PROXIES.length) return postOauth(tryNo + 1);
+              throw new Error('Пустой ответ авторизации Mail.ru. Попробуйте ещё раз.');
+            }
+            mailruCorsProxyIdx = idx;
+            return { ok: res.ok, data: data };
+          });
+        }).catch(function (err) {
+          if (err && err.message && /Прокси|Пустой|Неверный|клиент|связи|Таймаут|Mail\.ru/i.test(err.message)) throw err;
+          if (tryNo + 1 < MAILRU_CORS_PROXIES.length) return postOauth(tryNo + 1);
+          if (err && err.name === 'AbortError') throw new Error('Таймаут входа в Mail.ru. Попробуйте ещё раз.');
+          throw new Error('Нет связи с авторизацией Mail.ru. Проверьте интернет или попробуйте VPN.');
         });
-      }).then(function (got) {
+      }
+
+      return postOauth(0).then(function (got) {
         if (!got.ok || !got.data || !got.data.access_token) {
-          const msg = (got.data && (got.data.error_description || got.data.error)) || 'Неверный логин или пароль';
-          throw new Error(String(msg));
+          const msg = (got.data && (got.data.error_description || got.data.error)) || '';
+          throw new Error(mailruTranslateAuthError(msg));
         }
         const token = got.data.access_token;
         const expiresIn = Number(got.data.expires_in) || 3600;
@@ -4189,9 +4263,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         }).then(function (res) {
           return res.json().catch(function () { return {}; });
         }).then(function (me) {
-          const body = (me && me.body && typeof me.body === 'object') ? me.body : {};
-          const email = (me && me.email) || body.login || login;
-          let name = body.nick || body.name || body.first_name || '';
+          const bodyMe = (me && me.body && typeof me.body === 'object') ? me.body : {};
+          const email = (me && me.email) || bodyMe.login || login;
+          let name = bodyMe.nick || bodyMe.name || bodyMe.first_name || '';
           if (!name) name = String(email).split('@')[0];
           return {
             access_token: token,
@@ -4522,6 +4596,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           nameInput.value = String(sess.name || sess.email || login).slice(0, 40);
           try { localStorage.setItem(SYNC_NAME_KEY, nameInput.value.trim()); } catch (e) {}
         }
+        if (passEl) passEl.value = '';
         if (syncApiOrigin()) publishApiOriginToJsonblob(syncApiOrigin());
         closeMailruModal();
         showSyncToast('Mail.ru: вход выполнен · сохраняю файл синхронизации…', 'ok', 5000);
@@ -4561,16 +4636,27 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       }
 
       // Prefer bothost proxy when known; otherwise login directly via CORS relay (GitHub Pages).
-      viaBothost().catch(function () {
-        return mailruDirectLogin(login, password);
-      }).then(finishOk).catch(function (err) {
+      const loginPromise = (function () {
+        const base = mailruApiBase();
+        if (!base) return mailruDirectLogin(login, password);
+        return viaBothost().catch(function (err) {
+          const msg = String((err && err.message) || '');
+          // Wrong credentials from bothost — do not mask with a second CORS attempt.
+          if (/invalid|password|login|неверн|парол|username/i.test(msg)) {
+            throw new Error(mailruTranslateAuthError(msg));
+          }
+          return mailruDirectLogin(login, password);
+        });
+      })();
+
+      loginPromise.then(finishOk).catch(function (err) {
         if (errEl) {
           errEl.style.display = 'block';
-          errEl.textContent = (err && err.message) ? err.message : 'Ошибка входа';
+          errEl.textContent = mailruTranslateAuthError((err && err.message) ? err.message : 'Ошибка входа');
         }
       }).finally(function () {
         if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Войти'; }
-        if (passEl) passEl.value = '';
+        // Keep password on error so the user can retry; clear only after success (finishOk → close).
       });
     }
 
