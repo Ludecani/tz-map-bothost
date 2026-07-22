@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +18,15 @@ VIS_BASE = "https://mantledb.sh/v2/visibility/tzmap-public"
 SYNC_STATE_PATH = os.path.join(BASE, "data", "sync-state.json")
 SYNC_STATE_LOCK = threading.Lock()
 _EMPTY_SYNC = {"v": 1, "r": "tz-map-novgorod", "t": 0, "m": {}}
+
+# Shared Mail.ru public folder for sync-state.json (participants login to write).
+MAILRU_WEBLINK = os.environ.get("MAILRU_WEBLINK", "fztm/mjzaGLfJv").strip().strip("/")
+MAILRU_SYNC_NAME = os.environ.get("MAILRU_SYNC_NAME", "sync-state.json").strip() or "sync-state.json"
+MAILRU_OAUTH_URL = "https://o2.mail.ru/token"
+MAILRU_CLIENT_ID = "cloud-win"
+MAILRU_API = "https://cloud.mail.ru/api/v2"
+MAILRU_DISPATCH_U = "https://dispatcher.cloud.mail.ru/u"
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
 def _seed_sync_candidates():
@@ -138,6 +148,312 @@ def save_sync_state_merge(incoming):
         return merged
 
 
+def _http_json(url, method="GET", data=None, headers=None, form=None, timeout=25):
+    h = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/plain, */*",
+    }
+    if headers:
+        h.update(headers)
+    body = data
+    if form is not None:
+        body = urllib.parse.urlencode(form).encode("utf-8")
+        h["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=body, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "json" in ctype or (raw[:1] in (b"{", b"[")):
+                try:
+                    return resp.status, json.loads(raw.decode("utf-8") or "null"), raw, dict(resp.headers)
+                except Exception:
+                    return resp.status, None, raw, dict(resp.headers)
+            return resp.status, None, raw, dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        raw = e.read() if hasattr(e, "read") else b""
+        parsed = None
+        try:
+            parsed = json.loads(raw.decode("utf-8") or "null")
+        except Exception:
+            parsed = None
+        return e.code, parsed, raw, dict(e.headers or {})
+
+
+def mailru_login(login, password):
+    status, parsed, raw, _ = _http_json(
+        MAILRU_OAUTH_URL,
+        method="POST",
+        form={
+            "client_id": MAILRU_CLIENT_ID,
+            "grant_type": "password",
+            "username": login,
+            "password": password,
+        },
+    )
+    if status != 200 or not isinstance(parsed, dict) or not parsed.get("access_token"):
+        err = "login_failed"
+        if isinstance(parsed, dict):
+            err = parsed.get("error_description") or parsed.get("error") or err
+        return None, str(err)
+    token = parsed["access_token"]
+    expires_in = int(parsed.get("expires_in") or 3600)
+    me = mailru_user(token)
+    return {
+        "access_token": token,
+        "expires_in": expires_in,
+        "expires_at": int(time.time()) + expires_in,
+        "email": (me or {}).get("email") or login,
+        "name": (me or {}).get("name") or login.split("@")[0],
+    }, None
+
+
+def mailru_user(token):
+    status, parsed, _, _ = _http_json(
+        f"{MAILRU_API}/user?access_token={urllib.parse.quote(token)}"
+    )
+    if status != 200 or not isinstance(parsed, dict):
+        return None
+    body = parsed.get("body") if isinstance(parsed.get("body"), dict) else {}
+    email = parsed.get("email") or body.get("login") or ""
+    nick = ""
+    owner = body.get("ui") if isinstance(body.get("ui"), dict) else {}
+    # Prefer human-readable fields when present.
+    for key in ("nick", "name", "first_name"):
+        if body.get(key):
+            nick = str(body.get(key)).strip()
+            break
+    if not nick and isinstance(body.get("cloud"), dict):
+        pass
+    if not nick:
+        nick = (email.split("@")[0] if email else "mailru")[:24]
+    return {"email": email, "name": nick[:40], "raw": body}
+
+
+def _mailru_upload_shard(token):
+    # OAuth dispatcher returns plain URL word.
+    status, _, raw, _ = _http_json(MAILRU_DISPATCH_U, method="GET", timeout=20)
+    if status == 200 and raw:
+        url = raw.decode("utf-8", "replace").strip().split()[0]
+        if url.startswith("http"):
+            return url
+    status, parsed, _, _ = _http_json(
+        f"{MAILRU_API}/dispatcher?access_token={urllib.parse.quote(token)}"
+    )
+    if status == 200 and isinstance(parsed, dict):
+        body = parsed.get("body") or {}
+        for key in ("upload", "public_upload"):
+            rows = body.get(key) or []
+            if rows and isinstance(rows, list) and rows[0].get("url"):
+                return rows[0]["url"]
+    return "https://uploader.cloud.mail.ru/upload-web/"
+
+
+def _mailru_public_download_base():
+    status, parsed, _, _ = _http_json(f"{MAILRU_API}/dispatcher")
+    if status == 200 and isinstance(parsed, dict):
+        rows = ((parsed.get("body") or {}).get("weblink_get") or [])
+        if rows and rows[0].get("url"):
+            # e.g. https://cloclo52.cloud.mail.ru/public/TOKEN/g/no → use host /public/
+            url = rows[0]["url"]
+            try:
+                parts = urllib.parse.urlsplit(url)
+                return f"{parts.scheme}://{parts.netloc}/public"
+            except Exception:
+                pass
+    return "https://cloclo52.cloud.mail.ru/public"
+
+
+def mailru_read_sync_doc(token=None):
+    """Read sync-state.json from the public weblink folder (auth optional for public files)."""
+    # 1) Direct public CDN-style URL
+    base = _mailru_public_download_base()
+    candidates = [
+        f"{base}/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
+        f"https://cloud.mail.ru/public/{MAILRU_WEBLINK}/{urllib.parse.quote(MAILRU_SYNC_NAME)}",
+    ]
+    if token:
+        q = urllib.parse.urlencode(
+            {
+                "weblink": f"/{MAILRU_WEBLINK}/{MAILRU_SYNC_NAME}",
+                "access_token": token,
+            }
+        )
+        # metadata first — some shards need auth path
+        st, parsed, _, _ = _http_json(f"{MAILRU_API}/file?{q}")
+        if st == 200 and isinstance(parsed, dict) and isinstance(parsed.get("body"), dict):
+            # still need bytes; fall through to download candidates
+            pass
+
+    for url in candidates:
+        st, parsed, raw, _ = _http_json(url, timeout=20)
+        if st == 200 and raw:
+            try:
+                doc = json.loads(raw.decode("utf-8"))
+                if isinstance(doc, dict) and isinstance(doc.get("m"), dict):
+                    return _normalize_compact(doc)
+            except Exception:
+                continue
+        if st == 200 and isinstance(parsed, dict) and isinstance(parsed.get("m"), dict):
+            return _normalize_compact(parsed)
+
+    # 2) Folder listing — file may be missing
+    q = urllib.parse.urlencode({"weblink": MAILRU_WEBLINK, "limit": 100})
+    if token:
+        q += "&access_token=" + urllib.parse.quote(token)
+    st, parsed, _, _ = _http_json(f"{MAILRU_API}/folder?{q}")
+    if st == 200 and isinstance(parsed, dict):
+        body = parsed.get("body") or {}
+        for item in body.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") == MAILRU_SYNC_NAME or str(item.get("weblink") or "").endswith(
+                MAILRU_SYNC_NAME
+            ):
+                # try public download again with weblink path from item
+                wl = str(item.get("weblink") or f"{MAILRU_WEBLINK}/{MAILRU_SYNC_NAME}").lstrip("/")
+                for url in (
+                    f"{base}/{wl}",
+                    f"https://cloud.mail.ru/public/{wl}",
+                ):
+                    st2, _, raw2, _ = _http_json(url, timeout=20)
+                    if st2 == 200 and raw2:
+                        try:
+                            doc = json.loads(raw2.decode("utf-8"))
+                            if isinstance(doc, dict) and isinstance(doc.get("m"), dict):
+                                return _normalize_compact(doc)
+                        except Exception:
+                            pass
+    return dict(_EMPTY_SYNC) | {"m": {}}
+
+
+def mailru_upload_bytes(token, content: bytes):
+    shard = _mailru_upload_shard(token).rstrip("/")
+    # PUT raw body; response is hash hex word
+    url = f"{shard}?{urllib.parse.urlencode({'client_id': MAILRU_CLIENT_ID, 'token': token})}"
+    req = urllib.request.Request(
+        url,
+        data=content,
+        headers={
+            "User-Agent": UA,
+            "Accept": "*/*",
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(len(content)),
+        },
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            word = resp.read().decode("utf-8", "replace").strip().split()[0]
+            if resp.status in (200, 201) and word:
+                return word.upper(), None
+            return None, f"upload_status_{resp.status}"
+    except urllib.error.HTTPError as e:
+        raw = e.read() if hasattr(e, "read") else b""
+        # Fallback: public_upload endpoint
+        if e.code in (401, 403, 404, 405):
+            return mailru_upload_bytes_public(token, content)
+        return None, f"upload_http_{e.code}:{raw[:200].decode('utf-8', 'replace')}"
+    except Exception as e:
+        return None, str(e)
+
+
+def mailru_upload_bytes_public(token, content: bytes):
+    url = (
+        "https://pu.cloud.mail.ru/upload/?cloud_domain=2&"
+        + urllib.parse.urlencode({"token": token, "client_id": MAILRU_CLIENT_ID})
+    )
+    req = urllib.request.Request(
+        url,
+        data=content,
+        headers={
+            "User-Agent": UA,
+            "Accept": "*/*",
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(len(content)),
+        },
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            word = resp.read().decode("utf-8", "replace").strip().split()[0]
+            if resp.status in (200, 201) and word:
+                return word.upper(), None
+            return None, f"public_upload_status_{resp.status}"
+    except urllib.error.HTTPError as e:
+        raw = e.read() if hasattr(e, "read") else b""
+        return None, f"public_upload_http_{e.code}:{raw[:200].decode('utf-8', 'replace')}"
+    except Exception as e:
+        return None, str(e)
+
+
+def mailru_weblink_file_add(token, file_hash, size, conflict="rewrite"):
+    weblink_path = f"/{MAILRU_WEBLINK}/{MAILRU_SYNC_NAME}"
+    form = {
+        "weblink": weblink_path,
+        "hash": file_hash,
+        "size": str(size),
+        "conflict": conflict,
+        "upload_type": "manual",
+        "api": "2",
+        "access_token": token,
+        "platform": "desktop_web",
+    }
+    status, parsed, raw, _ = _http_json(
+        f"{MAILRU_API}/weblinks/file/add",
+        method="POST",
+        form=form,
+        timeout=30,
+    )
+    if status == 200:
+        return True, parsed
+    # Alternate shape used by newer API
+    form2 = {
+        "weblink_id": f"/{MAILRU_WEBLINK}",
+        "file_path": f"/{MAILRU_SYNC_NAME}",
+        "home": f"/{MAILRU_SYNC_NAME}",
+        "weblink": weblink_path,
+        "hash": file_hash,
+        "size": str(size),
+        "conflict": conflict,
+        "upload_type": "manual",
+        "api": "2",
+        "access_token": token,
+    }
+    status2, parsed2, raw2, _ = _http_json(
+        f"{MAILRU_API}/weblinks/file/add",
+        method="POST",
+        form=form2,
+        timeout=30,
+    )
+    if status2 == 200:
+        return True, parsed2
+    err = raw2[:300].decode("utf-8", "replace") if raw2 else raw[:300].decode("utf-8", "replace")
+    return False, {"status": status2 or status, "error": err, "body": parsed2 or parsed}
+
+
+def mailru_write_sync_doc(token, incoming):
+    """Merge incoming compact doc into Mail.ru sync-state.json and upload."""
+    remote = mailru_read_sync_doc(token)
+    merged = _merge_compact(remote, incoming)
+    # Also keep local bothost copy in sync for peers without Mail.ru login yet.
+    try:
+        save_sync_state_merge(merged)
+    except Exception:
+        pass
+    payload = json.dumps(merged, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    file_hash, err = mailru_upload_bytes(token, payload)
+    if not file_hash:
+        return None, err or "upload_failed"
+    ok, info = mailru_weblink_file_add(token, file_hash, len(payload), conflict="rewrite")
+    if not ok:
+        # retry once with rename then rewrite path variant
+        ok2, info2 = mailru_weblink_file_add(token, file_hash, len(payload), conflict="rename")
+        if not ok2:
+            return None, info2 or info
+    return merged, None
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=ROOT, **kwargs)
@@ -164,7 +480,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _proxy(self, url, method, body=None):
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": UA,
             "Accept": "application/json",
         }
         if MANTLE_KEY:
@@ -199,6 +515,19 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
 
+    def _bearer_token(self, body_obj=None):
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        if isinstance(body_obj, dict) and body_obj.get("access_token"):
+            return str(body_obj.get("access_token")).strip()
+        qs = urllib.parse.urlparse(self.path).query
+        if qs:
+            q = urllib.parse.parse_qs(qs)
+            if q.get("access_token"):
+                return q["access_token"][0]
+        return ""
+
     def _handle_sync_state(self, method):
         path = self.path.split("?", 1)[0]
         if path.rstrip("/") != "/api/sync/state":
@@ -221,12 +550,85 @@ class Handler(SimpleHTTPRequestHandler):
             return True
         return False
 
+    def _handle_mailru(self, method):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/api/mailru/login" and method == "POST":
+            raw = self._read_body()
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                self._json_response(400, {"error": "invalid json"})
+                return True
+            login = str(body.get("login") or body.get("email") or "").strip()
+            password = str(body.get("password") or "")
+            if not login or not password:
+                self._json_response(400, {"error": "login_and_password_required"})
+                return True
+            result, err = mailru_login(login, password)
+            if err or not result:
+                self._json_response(401, {"error": err or "login_failed"})
+                return True
+            # Never echo password; token is returned for client-side session only.
+            self._json_response(200, result)
+            return True
+
+        if path == "/api/mailru/me" and method == "GET":
+            token = self._bearer_token()
+            if not token:
+                self._json_response(401, {"error": "token_required"})
+                return True
+            me = mailru_user(token)
+            if not me:
+                self._json_response(401, {"error": "invalid_token"})
+                return True
+            self._json_response(200, {"email": me["email"], "name": me["name"]})
+            return True
+
+        if path == "/api/mailru/sync":
+            if method == "GET":
+                token = self._bearer_token() or None
+                doc = mailru_read_sync_doc(token)
+                # Prefer richer of Mail.ru vs local bothost store.
+                local = load_sync_state()
+                merged = _merge_compact(doc, local)
+                self._json_response(200, merged)
+                return True
+            if method in ("PUT", "POST"):
+                raw = self._read_body()
+                try:
+                    body = json.loads(raw.decode("utf-8") or "{}")
+                except Exception:
+                    self._json_response(400, {"error": "invalid json"})
+                    return True
+                token = self._bearer_token(body)
+                if not token:
+                    self._json_response(401, {"error": "mailru_login_required"})
+                    return True
+                incoming = body.get("doc") if isinstance(body.get("doc"), dict) else body
+                # Strip token fields from compact doc merge input
+                if isinstance(incoming, dict):
+                    incoming = {
+                        k: v
+                        for k, v in incoming.items()
+                        if k in ("v", "r", "t", "m")
+                    }
+                merged, err = mailru_write_sync_doc(token, incoming)
+                if err or not merged:
+                    self._json_response(502, {"error": err or "mailru_write_failed"})
+                    return True
+                self._json_response(200, merged)
+                return True
+        return False
+
     def do_OPTIONS(self):
-        if self.path.startswith("/api/sync/"):
+        if self.path.startswith("/api/"):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Mantle-Key")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, X-Mantle-Key, Authorization",
+            )
             self.end_headers()
             return
         super().do_OPTIONS()
@@ -237,6 +639,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"ok")
+            return
+        if self._handle_mailru("GET"):
             return
         if self._handle_sync_state("GET"):
             return
@@ -251,6 +655,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path in ("/webhook", "/webhook/"):
             self._webhook_ok()
+            return
+        if self._handle_mailru("POST"):
             return
         if self._handle_sync_state("POST"):
             return
@@ -277,6 +683,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_error(501, "Unsupported method")
 
     def do_PUT(self):
+        if self._handle_mailru("PUT"):
+            return
         if self._handle_sync_state("PUT"):
             return
         if self.path.startswith("/api/sync/visibility/"):
@@ -302,6 +710,7 @@ if __name__ == "__main__":
     print(f"TZ map root: {ROOT}", flush=True)
     print("Sync proxy: /api/sync/ -> mantledb.sh", flush=True)
     print(f"Local sync store: {SYNC_STATE_PATH}", flush=True)
+    print(f"Mail.ru sync weblink: {MAILRU_WEBLINK}/{MAILRU_SYNC_NAME}", flush=True)
     for port in ports:
         if port == primary:
             continue

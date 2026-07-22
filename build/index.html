@@ -3612,6 +3612,15 @@ function bothostStateUrl() {
   }
 }
 
+function mailruApiBase() {
+  if (!syncHasLocalProxy()) return '';
+  try {
+    return location.origin.replace(/\/$/, '') + '/api/mailru';
+  } catch (e) {
+    return '';
+  }
+}
+
 const MAP_SYNC = {
   enabled: true,
   provider: 'mantledb',
@@ -3772,6 +3781,32 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     #sync-status.ok { color: #15803d; }
     #sync-status.warn { color: #b45309; }
     #sync-status.err { color: #dc2626; }
+    #mailru-login-btn, #mailru-logout-btn { white-space: nowrap; }
+    #mailru-user {
+      font-size: 12px; color: #0f766e; font-weight: 600; max-width: 160px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #mailru-modal {
+      display: none; position: fixed; inset: 0; z-index: 2147483600;
+      background: rgba(15, 23, 42, 0.45); align-items: center; justify-content: center;
+      padding: 16px;
+    }
+    #mailru-modal.open { display: flex; }
+    #mailru-modal .box {
+      width: min(92vw, 360px); background: #fff; border-radius: 12px;
+      padding: 18px 16px 14px; box-shadow: 0 18px 40px rgba(15,23,42,.28);
+    }
+    #mailru-modal h2 { margin: 0 0 6px; font-size: 16px; }
+    #mailru-modal p { margin: 0 0 12px; font-size: 12px; color: #4b5563; line-height: 1.4; }
+    #mailru-modal label { display: block; font-size: 12px; margin: 8px 0 4px; color: #374151; }
+    #mailru-modal input {
+      width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px;
+      padding: 9px 10px; font-size: 14px;
+    }
+    #mailru-modal .actions { display: flex; gap: 8px; margin-top: 14px; }
+    #mailru-modal .actions button { flex: 1; min-height: 40px; font-weight: 600; }
+    #mailru-modal #mailru-submit { background: #0f766e; color: #fff; border-color: #0f766e; }
+    #mailru-err { display: none; margin-top: 8px; color: #b91c1c; font-size: 12px; }
     #sync-toast {
       position: fixed;
       left: 50%;
@@ -3945,6 +3980,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       </div>
       <div class="toolbar-row sync-row" id="sync-panel">
         <span class="coverage-label">Совместно:</span>
+        <button type="button" id="mailru-login-btn" title="Войти через Mail.ru, чтобы писать в общий файл синхронизации">Войти Mail.ru</button>
+        <button type="button" id="mailru-logout-btn" style="display:none">Выйти</button>
+        <span id="mailru-user" style="display:none"></span>
         <input type="text" id="sync-name" placeholder="Ваше имя" maxlength="40" />
         <input type="text" id="sync-room" placeholder="Код комнаты" maxlength="48" />
         <button type="button" id="sync-connect">Подключить</button>
@@ -3954,6 +3992,21 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     </div>
     </div>
   </header>
+  <div id="mailru-modal" aria-hidden="true">
+    <div class="box" role="dialog" aria-labelledby="mailru-title">
+      <h2 id="mailru-title">Вход Mail.ru</h2>
+      <p>Нужен, чтобы сохранять отметки в общий файл на Облаке Mail.ru. Пароль на сервер bothost уходит только для обмена на токен и не сохраняется.</p>
+      <label for="mailru-login">Почта</label>
+      <input id="mailru-login" type="email" autocomplete="username" placeholder="name@mail.ru" />
+      <label for="mailru-password">Пароль</label>
+      <input id="mailru-password" type="password" autocomplete="current-password" />
+      <div id="mailru-err"></div>
+      <div class="actions">
+        <button type="button" id="mailru-cancel">Отмена</button>
+        <button type="button" id="mailru-submit">Войти</button>
+      </div>
+    </div>
+  </div>
   <div id="load-error" style="display:none;padding:14px 16px;background:#fef2f2;color:#991b1b;font-size:14px;line-height:1.45;border-bottom:1px solid #fecaca;"></div>
   <div id="sync-toast" role="status" aria-live="polite"></div>
   <div id="map"></div>
@@ -3967,6 +4020,175 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     const SYNC_ROOM_PUBLIC_KEY = 'tz_sync_room_public_v1';
     const SYNC_SNAP_KEY = 'tz_sync_snap_v2';
     const SYNC_OUTBOX_KEY = 'tz_sync_outbox_v1';
+    const MAILRU_SESSION_KEY = 'tz_mailru_session_v1';
+    let mailruSession = null;
+
+    function loadMailruSession() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(MAILRU_SESSION_KEY) || 'null');
+        if (!raw || !raw.access_token) return null;
+        if (raw.expires_at && Number(raw.expires_at) * 1000 < Date.now() - 30000) {
+          // still allow until server rejects; soft-expire after token lifetime
+          if (Number(raw.expires_at) * 1000 < Date.now()) return null;
+        }
+        return raw;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function saveMailruSession(sess) {
+      mailruSession = sess || null;
+      try {
+        if (sess) localStorage.setItem(MAILRU_SESSION_KEY, JSON.stringify(sess));
+        else localStorage.removeItem(MAILRU_SESSION_KEY);
+      } catch (e) {}
+      refreshMailruUi();
+    }
+
+    function getMailruToken() {
+      if (!mailruSession) mailruSession = loadMailruSession();
+      return mailruSession && mailruSession.access_token ? mailruSession.access_token : '';
+    }
+
+    function refreshMailruUi() {
+      const sess = mailruSession || loadMailruSession();
+      mailruSession = sess;
+      const loginBtn = document.getElementById('mailru-login-btn');
+      const logoutBtn = document.getElementById('mailru-logout-btn');
+      const userEl = document.getElementById('mailru-user');
+      const nameInput = document.getElementById('sync-name');
+      if (!loginBtn) return;
+      if (sess && sess.access_token) {
+        loginBtn.style.display = 'none';
+        if (logoutBtn) logoutBtn.style.display = '';
+        if (userEl) {
+          userEl.style.display = '';
+          userEl.textContent = sess.name || sess.email || 'Mail.ru';
+          userEl.title = sess.email || '';
+        }
+        if (nameInput && (sess.name || sess.email) && !nameInput.value.trim()) {
+          nameInput.value = String(sess.name || sess.email.split('@')[0] || '').slice(0, 40);
+          try { localStorage.setItem(SYNC_NAME_KEY, nameInput.value.trim()); } catch (e) {}
+        }
+      } else {
+        loginBtn.style.display = '';
+        if (logoutBtn) logoutBtn.style.display = 'none';
+        if (userEl) {
+          userEl.style.display = 'none';
+          userEl.textContent = '';
+        }
+      }
+    }
+
+    function openMailruModal() {
+      const modal = document.getElementById('mailru-modal');
+      if (!modal) return;
+      if (!mailruApiBase()) {
+        showSyncToast('Откройте карту на bothost — вход Mail.ru работает через сервер карты', 'warn', 6000);
+        return;
+      }
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden', 'false');
+      const err = document.getElementById('mailru-err');
+      if (err) { err.style.display = 'none'; err.textContent = ''; }
+      const login = document.getElementById('mailru-login');
+      if (login) setTimeout(function () { login.focus(); }, 50);
+    }
+
+    function closeMailruModal() {
+      const modal = document.getElementById('mailru-modal');
+      if (!modal) return;
+      modal.classList.remove('open');
+      modal.setAttribute('aria-hidden', 'true');
+      const pw = document.getElementById('mailru-password');
+      if (pw) pw.value = '';
+    }
+
+    function submitMailruLogin() {
+      const base = mailruApiBase();
+      if (!base) {
+        showSyncToast('Нужен bothost URL для входа Mail.ru', 'err', 5000);
+        return;
+      }
+      const loginEl = document.getElementById('mailru-login');
+      const passEl = document.getElementById('mailru-password');
+      const errEl = document.getElementById('mailru-err');
+      const submitBtn = document.getElementById('mailru-submit');
+      const login = (loginEl && loginEl.value || '').trim();
+      const password = passEl ? passEl.value : '';
+      if (!login || !password) {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Укажите почту и пароль'; }
+        return;
+      }
+      if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Вход…'; }
+      if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+      syncFetch(base + '/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ login: login, password: password }),
+        timeout: 20000,
+        retries: 0
+      }).then(function (res) {
+        return res.json().then(function (body) {
+          return { ok: res.ok, body: body };
+        });
+      }).then(function (got) {
+        if (!got.ok || !got.body || !got.body.access_token) {
+          const msg = (got.body && got.body.error) ? String(got.body.error) : 'Не удалось войти';
+          throw new Error(msg);
+        }
+        saveMailruSession({
+          access_token: got.body.access_token,
+          expires_at: got.body.expires_at || (Math.floor(Date.now() / 1000) + (got.body.expires_in || 3600)),
+          email: got.body.email || login,
+          name: got.body.name || login.split('@')[0]
+        });
+        const nameInput = document.getElementById('sync-name');
+        if (nameInput) {
+          nameInput.value = String(got.body.name || got.body.email || login).slice(0, 40);
+          try { localStorage.setItem(SYNC_NAME_KEY, nameInput.value.trim()); } catch (e) {}
+        }
+        closeMailruModal();
+        showSyncToast('Mail.ru: вход выполнен · можно сохранять отметки в облако', 'ok', 5000);
+        // Pull shared file and push any local dirty marks.
+        pullSyncState();
+        scheduleSyncPush();
+      }).catch(function (err) {
+        if (errEl) {
+          errEl.style.display = 'block';
+          errEl.textContent = (err && err.message) ? err.message : 'Ошибка входа';
+        }
+      }).finally(function () {
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Войти'; }
+        if (passEl) passEl.value = '';
+      });
+    }
+
+    function bindMailruUi() {
+      mailruSession = loadMailruSession();
+      refreshMailruUi();
+      const loginBtn = document.getElementById('mailru-login-btn');
+      const logoutBtn = document.getElementById('mailru-logout-btn');
+      const modal = document.getElementById('mailru-modal');
+      const cancel = document.getElementById('mailru-cancel');
+      const submit = document.getElementById('mailru-submit');
+      const passEl = document.getElementById('mailru-password');
+      if (loginBtn) loginBtn.addEventListener('click', openMailruModal);
+      if (logoutBtn) logoutBtn.addEventListener('click', function () {
+        saveMailruSession(null);
+        showSyncToast('Вышли из Mail.ru', 'warn', 3000);
+      });
+      if (cancel) cancel.addEventListener('click', closeMailruModal);
+      if (submit) submit.addEventListener('click', submitMailruLogin);
+      if (passEl) passEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') submitMailruLogin();
+      });
+      if (modal) modal.addEventListener('click', function (e) {
+        if (e.target === modal) closeMailruModal();
+      });
+    }
+
     const data = MARKERS.map(function (item, index) {
       return Object.assign({}, item, { id: item.id || makeId(item, index) });
     });
@@ -4358,7 +4580,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     function getSyncName() {
       const el = document.getElementById('sync-name');
-      const name = (el && el.value ? el.value : localStorage.getItem(SYNC_NAME_KEY) || '').trim();
+      let name = (el && el.value ? el.value : localStorage.getItem(SYNC_NAME_KEY) || '').trim();
+      if (!name) {
+        const sess = mailruSession || loadMailruSession();
+        if (sess) name = String(sess.name || (sess.email || '').split('@')[0] || '').trim();
+      }
       return name || 'Коллега';
     }
 
@@ -4798,6 +5024,33 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       return attempt(1).catch(function () { return false; });
     }
 
+    function pushMailruSnapshot() {
+      const base = typeof mailruApiBase === 'function' ? mailruApiBase() : '';
+      const token = getMailruToken();
+      if (!base || !token) return Promise.resolve(false);
+      const localDoc = buildCompactDoc();
+      return syncFetch(base + '/sync', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': 'Bearer ' + token
+        },
+        body: JSON.stringify({ doc: localDoc, access_token: token }),
+        cache: 'no-store',
+        timeout: SYNC_SAVE_MS,
+        retries: 1
+      }).then(function (res) {
+        if (res.status === 401) {
+          saveMailruSession(null);
+          showSyncToast('Сессия Mail.ru истекла — войдите снова', 'warn', 5000);
+          return false;
+        }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return true;
+      }).catch(function () { return false; });
+    }
+
     function pushMantleRoomSnapshot() {
       // Read-merge-write: a blind full-room POST would wipe marks other clients still hold only remotely.
       try {
@@ -4974,21 +5227,22 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       rememberOutboxIds(allIds);
       setSyncStatus('сохранение…', 'warn');
 
-      // Channels: bothost file store (RU), jsonblob, Mantle room/marks.
+      // Channels: Mail.ru shared file (login), bothost file store, jsonblob, Mantle.
+      const mailruP = pushMailruSnapshot().catch(function () { return false; });
       const bothostP = pushBothostStateSnapshot().catch(function () { return false; });
       const blobP = pushJsonblobSnapshot().catch(function () { return false; });
       const roomP = pushMantleRoomSnapshot().catch(function () { return false; });
       const marksP = pushMantleMarksBackground(allIds).catch(function () { return false; });
 
-      return Promise.all([bothostP, blobP, roomP, marksP]).then(function (results) {
-        const bothostOk = !!results[0];
-        const blobOk = !!results[1];
-        const roomOk = !!results[2];
-        const marksOk = !!results[3];
-        if (bothostOk || blobOk || roomOk || marksOk) {
+      return Promise.all([mailruP, bothostP, blobP, roomP, marksP]).then(function (results) {
+        const mailruOk = !!results[0];
+        const bothostOk = !!results[1];
+        const blobOk = !!results[2];
+        const roomOk = !!results[3];
+        const marksOk = !!results[4];
+        if (mailruOk || bothostOk || blobOk || roomOk || marksOk) {
           finishLocalCloudSave(allIds);
           if (!blobOk) {
-            // Keep trying jsonblob in background so peers that only read blob still catch up later.
             setTimeout(function () {
               pushJsonblobSnapshot().catch(function () { return false; });
             }, 2500);
@@ -4996,9 +5250,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           return true;
         }
         const onBothost = typeof syncHasLocalProxy === 'function' && syncHasLocalProxy();
-        const tip = onBothost
-          ? 'На устройстве сохранено · облако недоступно, повтор…'
-          : 'На устройстве · откройте карту на bothost (не GitHub Pages)';
+        const hasToken = !!getMailruToken();
+        let tip = 'На устройстве сохранено · облако недоступно, повтор…';
+        if (onBothost && !hasToken) {
+          tip = 'Войдите через Mail.ru, чтобы писать в общий файл синхронизации';
+          openMailruModal();
+        } else if (!onBothost) {
+          tip = 'На устройстве · откройте карту на bothost и войдите в Mail.ru';
+        }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
         showSyncToast(tip, 'warn', 5500);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
@@ -5006,9 +5265,9 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         return false;
       }).catch(function () {
         const onBothost = typeof syncHasLocalProxy === 'function' && syncHasLocalProxy();
-        const tip = onBothost
-          ? 'На устройстве сохранено · облако недоступно, повтор…'
-          : 'На устройстве · откройте карту на bothost (не GitHub Pages)';
+        const tip = onBothost && !getMailruToken()
+          ? 'Войдите через Mail.ru, чтобы сохранять отметки в облако'
+          : 'На устройстве сохранено · облако недоступно, повтор…';
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
         showSyncToast(tip, 'warn', 5500);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
@@ -5196,6 +5455,26 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         });
       }
 
+      function readViaMailru() {
+        const base = typeof mailruApiBase === 'function' ? mailruApiBase() : '';
+        if (!base) return Promise.reject(new Error('no mailru'));
+        const headers = { 'Accept': 'application/json' };
+        const token = getMailruToken();
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+        return syncFetch(base + '/sync?_=' + Date.now(), {
+          method: 'GET',
+          headers: headers,
+          cache: 'no-store',
+          timeout: SYNC_PULL_FAST_MS,
+          retries: 1
+        }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function (doc) {
+          return { items: itemsFromCompactDoc(doc), complete: true, source: 'mailru' };
+        });
+      }
+
       function readViaPagesMirror() {
         const base = pagesMirrorUrl();
         const url = base + (base.indexOf('?') >= 0 ? '&' : '?') + '_=' + Date.now();
@@ -5225,6 +5504,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         });
       }
 
+      const pMailru = readViaMailru().catch(function () { return null; });
       const pBothost = readViaBothostState().catch(function () { return null; });
       const pRoom = readViaRoom().catch(function () { return null; });
       const pExport = readViaExport().catch(function () { return null; });
@@ -5232,6 +5512,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const pPages = readViaPagesMirror().catch(function () { return null; });
 
       return firstSuccess([
+        pMailru.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pBothost.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pBlob.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pPages.then(function (v) { if (!v) throw new Error('x'); return v; }),
@@ -5240,26 +5521,28 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       ]).then(function (first) {
         // Fast first paint only — never prune/snapshot here (partial sources can wipe marks).
         applyPullResult(first, { prune: false, persist: false });
-        return Promise.all([pBothost, pBlob, pPages, pRoom, pExport]).then(function (all) {
+        return Promise.all([pMailru, pBothost, pBlob, pPages, pRoom, pExport]).then(function (all) {
           const merged = {};
           let any = false;
           let gotBlob = false;
           let gotBothost = false;
+          let gotMailru = false;
           let hasLive = false;
           all.forEach(function (r) {
             if (!r || !r.items) return;
             any = true;
             if (r.source === 'jsonblob') gotBlob = true;
             if (r.source === 'bothost') gotBothost = true;
+            if (r.source === 'mailru') gotMailru = true;
             if (r.source && r.source !== 'pages') hasLive = true;
             mergeItemMaps(merged, r.items);
           });
           if (any) {
-            const src = gotBothost ? 'bothost' : (gotBlob ? 'jsonblob' : (hasLive ? 'mantle' : 'pages'));
+            const src = gotMailru ? 'mailru' : (gotBothost ? 'bothost' : (gotBlob ? 'jsonblob' : (hasLive ? 'mantle' : 'pages')));
             applyPullResult(
-              { items: merged, complete: gotBothost || gotBlob || hasLive, source: src },
-              // Prune only from authoritative live stores (bothost/jsonblob), never from pages mirror.
-              { prune: gotBothost || gotBlob, persist: true }
+              { items: merged, complete: gotMailru || gotBothost || gotBlob || hasLive, source: src },
+              // Prune from authoritative live stores, never from pages mirror.
+              { prune: gotMailru || gotBothost || gotBlob, persist: true }
             );
           }
           return true;
@@ -5384,6 +5667,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function initSyncUi() {
       const panel = document.getElementById('sync-panel');
       if (!panel) return;
+      bindMailruUi();
       const nameInput = document.getElementById('sync-name');
       const roomInput = document.getElementById('sync-room');
       if (nameInput) {
