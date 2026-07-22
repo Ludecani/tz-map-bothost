@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="tz-map-build" content="2026-07-22T08:05Z" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -3724,6 +3727,10 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%;
     }
     .header-top h1 { flex: 1; min-width: 140px; }
+    .build-stamp {
+      font-size: 11px; font-weight: 700; color: #0f766e; background: #ccfbf1;
+      border: 1px solid #99f6e4; border-radius: 6px; padding: 4px 8px; white-space: nowrap;
+    }
     .panel-toggle {
       display: none; align-items: center; gap: 6px; padding: 8px 12px;
       font-weight: 600; background: #111827; color: #fff; border-color: #111827;
@@ -4000,6 +4007,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты">v22.07.08:05</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -4373,10 +4381,6 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         document.getElementById('mailru-user-top')
       ];
       const nameInput = document.getElementById('sync-name');
-      const apiInput = document.getElementById('mailru-api');
-      if (apiInput && !apiInput.value && syncApiOrigin()) {
-        apiInput.value = syncApiOrigin();
-      }
       if (sess && sess.access_token) {
         loginBtns.forEach(function (b) { if (b) b.style.display = 'none'; });
         logoutBtns.forEach(function (b) { if (b) b.style.display = ''; });
@@ -5621,7 +5625,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         if (!hasToken) {
           tip = onBothost
             ? 'Войдите через Mail.ru (кнопка сверху), чтобы писать sync-state.json в общую папку'
-            : 'Нажмите «Войти Mail.ru». Если попросит ссылку бота — это адрес с bothost.ru (не API-ключ), один раз';
+            : 'Нажмите «Войти Mail.ru» сверху (почта и пароль) — иначе общий файл в облаке не появится';
           openMailruModal();
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
@@ -5631,7 +5635,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         return false;
       }).catch(function () {
         const tip = !getMailruToken()
-          ? 'Войдите через Mail.ru (почта и пароль). Ссылку бота bothost указывают только один раз, если карта её ещё не знает'
+          ? 'Войдите через Mail.ru (почта и пароль), чтобы писать sync-state.json в общую папку'
           : 'На устройстве сохранено · облако недоступно, повтор…';
         if (!getMailruToken()) openMailruModal();
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
