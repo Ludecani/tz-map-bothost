@@ -29,6 +29,7 @@ jobs:
           python-version: "3.12"
 
       - name: Resolve credentials
+        id: creds
         env:
           SECRET_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
           SECRET_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
@@ -42,9 +43,15 @@ jobs:
           if [ -n "${PASS}" ]; then echo "::add-mask::${PASS}"; fi
           if [ -n "${LOGIN}" ]; then echo "::add-mask::${LOGIN}"; fi
           if [ -z "${LOGIN}" ] || [ -z "${PASS}" ]; then
-            echo "::error::Нужны почта и пароль приложения в форме Run workflow."
-            exit 1
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+              echo "::error::Нужны почта и пароль приложения в форме Run workflow."
+              exit 1
+            fi
+            echo "::notice::Пропуск: нет MAILRU_LOGIN/MAILRU_PASSWORD. Для загрузки запустите Run workflow и заполните форму."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
           if [ -n "${INPUT_LOGIN}" ]; then
             echo "Источник: форма Run workflow"
             echo "::warning::Пароль из формы может сохраниться в логах GitHub. Смените пароль приложения после успешной загрузки и перенесите его в Repository secrets."
@@ -61,6 +68,7 @@ jobs:
           } >> "${GITHUB_ENV}"
 
       - name: Upload sync-state.json to Mail.ru shared folder
+        if: steps.creds.outputs.skip != 'true'
         env:
           SYNC_JSONBLOB_URL: ${{ secrets.SYNC_JSONBLOB_URL }}
           MAILRU_WEBLINK: ${{ secrets.MAILRU_WEBLINK }}

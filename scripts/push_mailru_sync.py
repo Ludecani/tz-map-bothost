@@ -277,17 +277,19 @@ def register(token: str, file_hash: str, size: int, weblink: str, name: str) -> 
     raise SystemExit(f"register_failed:{last}")
 
 
-def verify_public(weblink: str, name: str) -> bool:
+def verify_public(weblink: str, name: str, token: str = "") -> bool:
     # Content is served via /weblink/view/, not /public/ (that path 404s for this folder).
     urls = [
         f"https://cloclo52.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
         f"https://cloclo53.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
         f"https://cloclo61.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
         f"https://cloclo64.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
+        f"https://cloclo21.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
     ]
     for url in urls:
         for _ in range(3):
             st, raw, _ = http(url + "?_=" + str(int(time.time() * 1000)))
+            print(f"verify view {url} -> {st}")
             if st == 200:
                 try:
                     doc = json.loads(raw.decode("utf-8", "replace"))
@@ -295,17 +297,29 @@ def verify_public(weblink: str, name: str) -> bool:
                         return True
                 except Exception:
                     pass
-            time.sleep(0.8)
-    # Fallback: folder listing already shows the file.
-    st, raw, _ = http(f"{API}/folder?weblink={urllib.parse.quote('/' + weblink)}")
-    if st == 200:
+            time.sleep(0.5)
+    # Fallback: folder listing already shows the file (auth optional).
+    folder_urls = [
+        f"{API}/folder?weblink={urllib.parse.quote('/' + weblink)}",
+        f"{API}/folder?weblink={urllib.parse.quote(weblink)}",
+    ]
+    if token:
+        folder_urls = [
+            u + f"&access_token={urllib.parse.quote(token)}" for u in folder_urls
+        ] + folder_urls
+    for folder_url in folder_urls:
+        st, raw, _ = http(folder_url)
+        print(f"verify folder -> {st}")
+        if st != 200:
+            continue
         try:
             body = json.loads(raw.decode("utf-8", "replace")).get("body") or {}
             for item in body.get("list") or []:
                 if isinstance(item, dict) and item.get("name") == name:
+                    print("verify folder: found", name)
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            print("verify folder parse err", e)
     return False
 
 
@@ -345,8 +359,8 @@ def main() -> int:
     print("upload hash", file_hash)
     register(token, file_hash, len(payload), weblink, name)
     print("registered")
-    if not verify_public(weblink, name):
-        raise SystemExit("verify_failed: file not visible in public folder")
+    if not verify_public(weblink, name, token):
+        raise SystemExit("verify_failed: file not visible via weblink/view or folder list")
     print("OK visible in Mail.ru folder", f"https://cloud.mail.ru/public/{weblink}/{name}")
     return 0
 
