@@ -3626,17 +3626,21 @@ function rememberSyncApiOrigin(origin) {
   if (!o) return;
   resolvedSyncApiOrigin = o;
   try { localStorage.setItem(SYNC_API_ORIGIN_KEY, o); } catch (e) {}
-  try {
-    if (typeof MAP_SYNC !== 'undefined' && MAP_SYNC) {
-      MAP_SYNC.baseUrl = o + '/api/sync';
-      MAP_SYNC.usesProxy = true;
-    }
-  } catch (e3) {}
+  // Do NOT reroute Mantle through a remote bothost URL — a bad/stale origin
+  // was breaking all cloud saves on GitHub Pages. Mantle proxy only when the
+  // map itself is served from bothost/localhost.
+}
+
+function clearSyncApiOrigin() {
+  resolvedSyncApiOrigin = '';
+  try { localStorage.removeItem(SYNC_API_ORIGIN_KEY); } catch (e) {}
 }
 
 function syncBaseUrl() {
-  const api = syncApiOrigin();
-  if (api) return api + '/api/sync';
+  // Pages → direct Mantle. Bothost host → local /api/sync proxy.
+  if (syncHasLocalProxy()) {
+    try { return location.origin.replace(/\/$/, '') + '/api/sync'; } catch (e) {}
+  }
   return MAP_SYNC_DIRECT;
 }
 
@@ -3652,6 +3656,44 @@ function bothostStateUrl() {
 function mailruApiBase() {
   const api = syncApiOrigin();
   return api ? (api + '/api/mailru') : '';
+}
+
+function validateSyncApiOrigin(origin) {
+  const o = normalizeApiOrigin(origin);
+  if (!o) return Promise.resolve('');
+  // Reject obvious placeholders from old tests.
+  if (/bot-123\.bothost\.ru/i.test(o)) return Promise.resolve('');
+  const ctrl = new AbortController();
+  const timer = setTimeout(function () { ctrl.abort(); }, 6000);
+  return fetch(o + '/health', { method: 'GET', cache: 'no-store', signal: ctrl.signal })
+    .finally(function () { clearTimeout(timer); })
+    .then(function (res) {
+      if (!res.ok) throw new Error('bad health');
+      return res.text();
+    })
+    .then(function (txt) {
+      if (String(txt || '').trim().toLowerCase().indexOf('ok') < 0) throw new Error('not ok');
+      return o;
+    })
+    .catch(function () {
+      const ctrl2 = new AbortController();
+      const timer2 = setTimeout(function () { ctrl2.abort(); }, 6000);
+      return fetch(o + '/api/public-config', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        cache: 'no-store',
+        signal: ctrl2.signal
+      }).finally(function () { clearTimeout(timer2); })
+        .then(function (res) {
+          if (!res.ok) throw new Error('bad config');
+          return res.json();
+        })
+        .then(function (body) {
+          const confirmed = normalizeApiOrigin((body && body.apiOrigin) || o);
+          return confirmed || o;
+        })
+        .catch(function () { return ''; });
+    });
 }
 
 const MAP_SYNC = {
@@ -3818,6 +3860,14 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     #sync-status.warn { color: #b45309; }
     #sync-status.err { color: #dc2626; }
     #mailru-login-btn, #mailru-logout-btn { white-space: nowrap; }
+    .mailru-login-top {
+      background: #0f766e !important; color: #fff !important; border-color: #0f766e !important;
+      font-weight: 700; white-space: nowrap; min-height: 36px; padding: 8px 12px;
+    }
+    .mailru-user-top {
+      font-size: 12px; color: #0f766e; font-weight: 600; max-width: 140px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     #mailru-user {
       font-size: 12px; color: #0f766e; font-weight: 600; max-width: 160px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -3838,6 +3888,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     #mailru-modal input {
       width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px;
       padding: 9px 10px; font-size: 14px;
+    }
+    #mailru-modal .mailru-hint {
+      margin: 6px 0 0; font-size: 11px; color: #6b7280; line-height: 1.35;
     }
     #mailru-modal .actions { display: flex; gap: 8px; margin-top: 14px; }
     #mailru-modal .actions button { flex: 1; min-height: 40px; font-weight: 600; }
@@ -3947,6 +4000,9 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
+      <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
+      <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
+      <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
       <span class="stats" id="stats"></span>
       <span class="note" id="count"></span>
       <button type="button" class="panel-toggle" id="panel-toggle" aria-expanded="false" aria-controls="controls-panel">Фильтры ▾</button>
@@ -4033,8 +4089,13 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <div id="mailru-modal" aria-hidden="true">
     <div class="box" role="dialog" aria-labelledby="mailru-title">
       <h2 id="mailru-title">Вход Mail.ru</h2>
-      <p>Нужен, чтобы сохранять отметки в общий файл на Облаке Mail.ru. Пароль уходит только на сервер синхронизации для обмена на токен и не сохраняется. Пользуйтесь обычной ссылкой карты.</p>
-      <label for="mailru-login">Почта</label>
+      <p>Войдите почтой Mail.ru, чтобы карта могла писать общий файл <b>sync-state.json</b> в папку «Синхронизация». Пароль не сохраняется на устройстве.</p>
+      <div id="mailru-bot-wrap" style="display:none">
+        <label for="mailru-api">Ссылка бота bothost (один раз)</label>
+        <input id="mailru-api" type="url" placeholder="https://bot-XXXX.bothost.ru" autocomplete="off" />
+        <p class="mailru-hint">Это не API-ключ. В панели bothost.ru откройте бота с картой и скопируйте его адрес (https://bot-….bothost.ru). После первого входа поле больше не понадобится.</p>
+      </div>
+      <label for="mailru-login">Почта Mail.ru</label>
       <input id="mailru-login" type="email" autocomplete="username" placeholder="name@mail.ru" />
       <label for="mailru-password">Пароль</label>
       <input id="mailru-password" type="password" autocomplete="current-password" />
@@ -4092,50 +4153,77 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function refreshMailruUi() {
       const sess = mailruSession || loadMailruSession();
       mailruSession = sess;
-      const loginBtn = document.getElementById('mailru-login-btn');
-      const logoutBtn = document.getElementById('mailru-logout-btn');
-      const userEl = document.getElementById('mailru-user');
+      const loginBtns = [
+        document.getElementById('mailru-login-btn'),
+        document.getElementById('mailru-login-btn-top')
+      ];
+      const logoutBtns = [
+        document.getElementById('mailru-logout-btn'),
+        document.getElementById('mailru-logout-btn-top')
+      ];
+      const userEls = [
+        document.getElementById('mailru-user'),
+        document.getElementById('mailru-user-top')
+      ];
       const nameInput = document.getElementById('sync-name');
-      if (!loginBtn) return;
+      const apiInput = document.getElementById('mailru-api');
+      if (apiInput && !apiInput.value && syncApiOrigin()) {
+        apiInput.value = syncApiOrigin();
+      }
       if (sess && sess.access_token) {
-        loginBtn.style.display = 'none';
-        if (logoutBtn) logoutBtn.style.display = '';
-        if (userEl) {
+        loginBtns.forEach(function (b) { if (b) b.style.display = 'none'; });
+        logoutBtns.forEach(function (b) { if (b) b.style.display = ''; });
+        userEls.forEach(function (userEl) {
+          if (!userEl) return;
           userEl.style.display = '';
           userEl.textContent = sess.name || sess.email || 'Mail.ru';
           userEl.title = sess.email || '';
-        }
+        });
         if (nameInput && (sess.name || sess.email) && !nameInput.value.trim()) {
           nameInput.value = String(sess.name || sess.email.split('@')[0] || '').slice(0, 40);
           try { localStorage.setItem(SYNC_NAME_KEY, nameInput.value.trim()); } catch (e) {}
         }
       } else {
-        loginBtn.style.display = '';
-        if (logoutBtn) logoutBtn.style.display = 'none';
-        if (userEl) {
+        loginBtns.forEach(function (b) { if (b) b.style.display = ''; });
+        logoutBtns.forEach(function (b) { if (b) b.style.display = 'none'; });
+        userEls.forEach(function (userEl) {
+          if (!userEl) return;
           userEl.style.display = 'none';
           userEl.textContent = '';
-        }
+        });
       }
+    }
+
+    function mailruNeedsBotLink() {
+      if (syncHasLocalProxy()) return false;
+      return !syncApiOrigin();
     }
 
     function openMailruModal() {
       const modal = document.getElementById('mailru-modal');
       if (!modal) return;
-      if (!mailruApiBase()) {
-        showSyncToast('Сервер синхронизации ещё не найден — подождите или обновите страницу', 'warn', 6000);
-        bootstrapSyncApiOrigin().then(function (ok) {
-          if (ok && mailruApiBase()) openMailruModal();
-          else showSyncToast('Нет связи с API bothost. Проверьте sync-api.json или параметр ?api=', 'err', 7000);
-        });
-        return;
-      }
       modal.classList.add('open');
       modal.setAttribute('aria-hidden', 'false');
       const err = document.getElementById('mailru-err');
       if (err) { err.style.display = 'none'; err.textContent = ''; }
+      const botWrap = document.getElementById('mailru-bot-wrap');
+      const apiInput = document.getElementById('mailru-api');
+      const needBot = mailruNeedsBotLink();
+      if (botWrap) botWrap.style.display = needBot ? '' : 'none';
+      if (apiInput) {
+        if (syncHasLocalProxy()) {
+          try { apiInput.value = location.origin.replace(/\/$/, ''); } catch (e) { apiInput.value = syncApiOrigin() || ''; }
+        } else {
+          apiInput.value = syncApiOrigin() || apiInput.value || '';
+        }
+      }
       const login = document.getElementById('mailru-login');
-      if (login) setTimeout(function () { login.focus(); }, 50);
+      if (login) {
+        setTimeout(function () {
+          if (needBot && apiInput && !apiInput.value) apiInput.focus();
+          else login.focus();
+        }, 50);
+      }
     }
 
     function closeMailruModal() {
@@ -4148,32 +4236,56 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     }
 
     function submitMailruLogin() {
-      const base = mailruApiBase();
-      if (!base) {
-        showSyncToast('Сервер синхронизации не найден — обновите страницу', 'err', 5000);
-        return;
-      }
+      const apiInput = document.getElementById('mailru-api');
       const loginEl = document.getElementById('mailru-login');
       const passEl = document.getElementById('mailru-password');
       const errEl = document.getElementById('mailru-err');
       const submitBtn = document.getElementById('mailru-submit');
+      let apiRaw = (apiInput && apiInput.value ? apiInput.value : '').trim();
+      if (!apiRaw) apiRaw = syncApiOrigin() || '';
+      if (!apiRaw && syncHasLocalProxy()) {
+        try { apiRaw = location.origin.replace(/\/$/, ''); } catch (e) {}
+      }
       const login = (loginEl && loginEl.value || '').trim();
       const password = passEl ? passEl.value : '';
+      if (!apiRaw) {
+        const botWrap = document.getElementById('mailru-bot-wrap');
+        if (botWrap) botWrap.style.display = '';
+        if (errEl) {
+          errEl.style.display = 'block';
+          errEl.textContent = 'Один раз вставьте ссылку бота из bothost.ru (https://bot-….bothost.ru). Это не API-ключ.';
+        }
+        if (apiInput) apiInput.focus();
+        return;
+      }
       if (!login || !password) {
-        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Укажите почту и пароль'; }
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Укажите почту и пароль Mail.ru'; }
         return;
       }
       if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Вход…'; }
       if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-      syncFetch(base + '/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ login: login, password: password }),
-        timeout: 20000,
-        retries: 0
-      }).then(function (res) {
-        return res.json().then(function (body) {
-          return { ok: res.ok, body: body };
+
+      validateSyncApiOrigin(apiRaw).then(function (okOrigin) {
+        if (!okOrigin) {
+          const botWrap = document.getElementById('mailru-bot-wrap');
+          if (botWrap) botWrap.style.display = '';
+          throw new Error('Ссылка бота не открывается. Проверьте адрес в bothost.ru (в браузере должно быть ok на /health)');
+        }
+        rememberSyncApiOrigin(okOrigin);
+        if (apiInput) apiInput.value = okOrigin;
+        const botWrap = document.getElementById('mailru-bot-wrap');
+        if (botWrap) botWrap.style.display = 'none';
+        const base = okOrigin + '/api/mailru';
+        return syncFetch(base + '/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ login: login, password: password }),
+          timeout: 20000,
+          retries: 0
+        }).then(function (res) {
+          return res.json().then(function (body) {
+            return { ok: res.ok, body: body };
+          });
         });
       }).then(function (got) {
         if (!got.ok || !got.body || !got.body.access_token) {
@@ -4191,9 +4303,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
           nameInput.value = String(got.body.name || got.body.email || login).slice(0, 40);
           try { localStorage.setItem(SYNC_NAME_KEY, nameInput.value.trim()); } catch (e) {}
         }
+        publishApiOriginToJsonblob(syncApiOrigin());
         closeMailruModal();
-        showSyncToast('Mail.ru: вход выполнен · можно сохранять отметки в облако', 'ok', 5000);
-        // Pull shared file and push any local dirty marks.
+        showSyncToast('Mail.ru: вход выполнен · сохраняю файл синхронизации…', 'ok', 5000);
+        // Immediately create/update sync-state.json in the Mail.ru folder.
+        pushMailruSnapshot().then(function (ok) {
+          if (ok) showSyncToast('Файл sync-state.json записан в Облако Mail.ru', 'ok', 5000);
+          else showSyncToast('Вход ок, но запись в папку Mail.ru не удалась — проверьте права rw', 'warn', 7000);
+        });
         pullSyncState();
         scheduleSyncPush();
       }).catch(function (err) {
@@ -4210,16 +4327,27 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     function bindMailruUi() {
       mailruSession = loadMailruSession();
       refreshMailruUi();
-      const loginBtn = document.getElementById('mailru-login-btn');
-      const logoutBtn = document.getElementById('mailru-logout-btn');
+      const loginBtns = [
+        document.getElementById('mailru-login-btn'),
+        document.getElementById('mailru-login-btn-top')
+      ];
+      const logoutBtns = [
+        document.getElementById('mailru-logout-btn'),
+        document.getElementById('mailru-logout-btn-top')
+      ];
       const modal = document.getElementById('mailru-modal');
       const cancel = document.getElementById('mailru-cancel');
       const submit = document.getElementById('mailru-submit');
       const passEl = document.getElementById('mailru-password');
-      if (loginBtn) loginBtn.addEventListener('click', openMailruModal);
-      if (logoutBtn) logoutBtn.addEventListener('click', function () {
-        saveMailruSession(null);
-        showSyncToast('Вышли из Mail.ru', 'warn', 3000);
+      loginBtns.forEach(function (loginBtn) {
+        if (loginBtn) loginBtn.addEventListener('click', openMailruModal);
+      });
+      logoutBtns.forEach(function (logoutBtn) {
+        if (!logoutBtn) return;
+        logoutBtn.addEventListener('click', function () {
+          saveMailruSession(null);
+          showSyncToast('Вышли из Mail.ru', 'warn', 3000);
+        });
       });
       if (cancel) cancel.addEventListener('click', closeMailruModal);
       if (submit) submit.addEventListener('click', submitMailruLogin);
@@ -5306,23 +5434,24 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         const onBothost = !!syncApiOrigin();
         const hasToken = !!getMailruToken();
         let tip = 'На устройстве сохранено · облако недоступно, повтор…';
-        if (onBothost && !hasToken) {
-          tip = 'Войдите через Mail.ru, чтобы писать в общий файл синхронизации';
+        if (!hasToken) {
+          tip = onBothost
+            ? 'Войдите через Mail.ru (кнопка сверху), чтобы писать sync-state.json в общую папку'
+            : 'Нажмите «Войти Mail.ru». Если попросит ссылку бота — это адрес с bothost.ru (не API-ключ), один раз';
           openMailruModal();
-        } else if (!onBothost) {
-          tip = 'На устройстве · войдите через Mail.ru после подключения облака';
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        showSyncToast(tip, 'warn', 5500);
+        showSyncToast(tip, 'warn', 7000);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
       }).catch(function () {
-        const tip = syncApiOrigin() && !getMailruToken()
-          ? 'Войдите через Mail.ru, чтобы сохранять отметки в облако'
+        const tip = !getMailruToken()
+          ? 'Войдите через Mail.ru (почта и пароль). Ссылку бота bothost указывают только один раз, если карта её ещё не знает'
           : 'На устройстве сохранено · облако недоступно, повтор…';
+        if (!getMailruToken()) openMailruModal();
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        showSyncToast(tip, 'warn', 5500);
+        showSyncToast(tip, 'warn', 7000);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
@@ -5761,12 +5890,29 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     }
 
     function bootstrapSyncApiOrigin() {
-      // 1) Already known
-      const current = syncApiOrigin();
-      if (current) {
-        rememberSyncApiOrigin(current);
-        if (syncHasLocalProxy()) publishApiOriginToJsonblob(current);
-        return Promise.resolve(true);
+      function adopt(origin) {
+        return validateSyncApiOrigin(origin).then(function (ok) {
+          if (!ok) {
+            clearSyncApiOrigin();
+            return false;
+          }
+          rememberSyncApiOrigin(ok);
+          if (syncHasLocalProxy()) publishApiOriginToJsonblob(ok);
+          return true;
+        });
+      }
+
+      // Prefer live bothost host; otherwise discover and VALIDATE before use.
+      if (syncHasLocalProxy()) {
+        try { return adopt(location.origin.replace(/\/$/, '')); } catch (e) {}
+      }
+
+      let queued = '';
+      try {
+        queued = normalizeApiOrigin(new URLSearchParams(location.search).get('api') || '');
+      } catch (e) {}
+      if (!queued) {
+        try { queued = normalizeApiOrigin(localStorage.getItem(SYNC_API_ORIGIN_KEY) || ''); } catch (e2) {}
       }
 
       function tryConfigFile() {
@@ -5784,22 +5930,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         }).then(function (cfg) {
           const o = normalizeApiOrigin((cfg && (cfg.apiOrigin || cfg.api || cfg.origin)) || '');
           if (!o) throw new Error('empty');
-          rememberSyncApiOrigin(o);
-          // Confirm / refresh via public-config when possible.
-          return syncFetch(o + '/api/public-config', {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' },
-            cache: 'no-store',
-            timeout: 5000,
-            retries: 0
-          }).then(function (res) {
-            if (!res.ok) return true;
-            return res.json().then(function (body) {
-              const confirmed = normalizeApiOrigin((body && body.apiOrigin) || o);
-              if (confirmed) rememberSyncApiOrigin(confirmed);
-              return true;
-            });
-          }).catch(function () { return true; });
+          return adopt(o);
         });
       }
 
@@ -5819,15 +5950,18 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         }).then(function (doc) {
           const o = normalizeApiOrigin((doc && doc._api) || '');
           if (!o) throw new Error('no _api');
-          rememberSyncApiOrigin(o);
-          return true;
+          return adopt(o);
         });
       }
 
-      return tryConfigFile().catch(function () {
-        return tryJsonblobApi();
-      }).catch(function () {
-        return false;
+      const start = queued ? adopt(queued) : Promise.resolve(false);
+      return start.then(function (ok) {
+        if (ok) return true;
+        return tryConfigFile().catch(function () {
+          return tryJsonblobApi();
+        }).catch(function () {
+          return false;
+        });
       });
     }
 
