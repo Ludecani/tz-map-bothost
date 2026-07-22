@@ -88,3 +88,5 @@ jobs:
         run: python3 scripts/push_mailru_sync.py
 
 # secrets check 2026-07-22T10:03Z
+
+# recheck secrets 2026-07-22T10:07Z
