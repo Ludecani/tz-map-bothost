@@ -278,10 +278,12 @@ def register(token: str, file_hash: str, size: int, weblink: str, name: str) -> 
 
 
 def verify_public(weblink: str, name: str) -> bool:
+    # Content is served via /weblink/view/, not /public/ (that path 404s for this folder).
     urls = [
-        f"https://cloclo53.cloud.mail.ru/public/{weblink}/{urllib.parse.quote(name)}",
-        f"https://cloclo51.cloud.mail.ru/public/{weblink}/{urllib.parse.quote(name)}",
-        f"https://cloud.mail.ru/public/{weblink}/{urllib.parse.quote(name)}",
+        f"https://cloclo52.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
+        f"https://cloclo53.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
+        f"https://cloclo61.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
+        f"https://cloclo64.cloud.mail.ru/weblink/view/{weblink}/{urllib.parse.quote(name)}",
     ]
     for url in urls:
         for _ in range(3):
@@ -293,7 +295,17 @@ def verify_public(weblink: str, name: str) -> bool:
                         return True
                 except Exception:
                     pass
-            time.sleep(1.0)
+            time.sleep(0.8)
+    # Fallback: folder listing already shows the file.
+    st, raw, _ = http(f"{API}/folder?weblink={urllib.parse.quote('/' + weblink)}")
+    if st == 200:
+        try:
+            body = json.loads(raw.decode("utf-8", "replace")).get("body") or {}
+            for item in body.get("list") or []:
+                if isinstance(item, dict) and item.get("name") == name:
+                    return True
+        except Exception:
+            pass
     return False
 
 
