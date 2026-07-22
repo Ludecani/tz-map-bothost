@@ -5,7 +5,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <meta name="tz-map-build" content="2026-07-22T10:35Z" />
+  <meta name="tz-map-build" content="2026-07-22T10:40Z" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -4009,7 +4009,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
-      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.10:35</span>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.10:40</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -4124,6 +4124,8 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     const SYNC_META_KEY = 'tz_completed_meta_v2';
     const SYNC_ROOM_PUBLIC_KEY = 'tz_sync_room_public_v1';
     const SYNC_SNAP_KEY = 'tz_sync_snap_v2';
+    const SYNC_BUILD_KEY = 'tz_sync_build_v1';
+    const SYNC_BUILD_STAMP = 'v22.07.10:40';
     const SYNC_OUTBOX_KEY = 'tz_sync_outbox_v1';
     const MAILRU_SESSION_KEY = 'tz_mailru_session_v1';
     const MAILRU_WEBLINK = 'fztm/mjzaGLfJv';
@@ -5347,6 +5349,13 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
 
     function loadSyncSnapshot(room) {
       try {
+        // Drop stale device cache after a live deploy so old «73 выполнено» cannot stick.
+        const prevBuild = localStorage.getItem(SYNC_BUILD_KEY) || '';
+        if (prevBuild !== SYNC_BUILD_STAMP) {
+          localStorage.setItem(SYNC_BUILD_KEY, SYNC_BUILD_STAMP);
+          localStorage.removeItem(SYNC_SNAP_KEY);
+          return null;
+        }
         const raw = JSON.parse(localStorage.getItem(SYNC_SNAP_KEY) || 'null');
         if (!raw || raw.room !== room || !raw.items || typeof raw.items !== 'object') return null;
         if (Date.now() - (Number(raw.at) || 0) > 7 * 24 * 3600 * 1000) return null;
