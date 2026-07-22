@@ -2,8 +2,17 @@ name: Push sync to Mail.ru folder
 
 on:
   workflow_dispatch:
+    inputs:
+      mailru_login:
+        description: "Почта Mail.ru (например rusakov_751@bk.ru)"
+        required: true
+        type: string
+      mailru_password:
+        description: "Пароль для внешних приложений (не обычный пароль почты)"
+        required: true
+        type: string
   schedule:
-    # Every 10 minutes — keeps «Синхронизация»/sync-state.json up to date from jsonblob.
+    # Needs repository secrets MAILRU_LOGIN + MAILRU_PASSWORD.
     - cron: "*/10 * * * *"
   push:
     branches: [main]
@@ -20,25 +29,38 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check repository secrets
+      - name: Resolve credentials
         env:
-          MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
-          MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
+          SECRET_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
+          SECRET_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
+          INPUT_LOGIN: ${{ inputs.mailru_login }}
+          INPUT_PASSWORD: ${{ inputs.mailru_password }}
         run: |
-          if [ -n "$MAILRU_LOGIN" ]; then echo "MAILRU_LOGIN present: YES"; else echo "MAILRU_LOGIN present: NO"; fi
-          if [ -n "$MAILRU_PASSWORD" ]; then echo "MAILRU_PASSWORD present: YES"; else echo "MAILRU_PASSWORD present: NO"; fi
-          if [ -z "$MAILRU_LOGIN" ] || [ -z "$MAILRU_PASSWORD" ]; then
-            echo "::error::Secrets are empty. Add Repository secrets (not Environment) named exactly MAILRU_LOGIN and MAILRU_PASSWORD."
-            echo "Open: https://github.com/Ludecani/tz-map-bothost/settings/secrets/actions"
-            echo "MAILRU_LOGIN = full email (e.g. rusakov_751@bk.ru)"
-            echo "MAILRU_PASSWORD = пароль для внешних приложений (not the normal mailbox password)"
+          LOGIN="${INPUT_LOGIN:-$SECRET_LOGIN}"
+          PASS="${INPUT_PASSWORD:-$SECRET_PASSWORD}"
+          if [ -n "$PASS" ]; then
+            echo "::add-mask::$PASS"
+          fi
+          if [ -n "$LOGIN" ]; then
+            echo "::add-mask::$LOGIN"
+          fi
+          if [ -z "$LOGIN" ] || [ -z "$PASS" ]; then
+            echo "::error::Нужны почта и пароль приложения. Запустите workflow вручную и заполните оба поля формы."
+            echo "Форма: https://github.com/Ludecani/tz-map-bothost/actions/workflows/mailru-sync.yml"
             exit 1
           fi
+          if [ -n "$INPUT_LOGIN" ]; then
+            echo "Источник: форма Run workflow"
+          else
+            echo "Источник: repository secrets"
+          fi
+          {
+            echo "MAILRU_LOGIN=$LOGIN"
+            echo "MAILRU_PASSWORD=$PASS"
+          } >> "$GITHUB_ENV"
 
       - name: Upload sync-state.json to Mail.ru shared folder
         env:
-          MAILRU_LOGIN: ${{ secrets.MAILRU_LOGIN || secrets.MAILRU_EMAIL || secrets.MAIL_LOGIN }}
-          MAILRU_PASSWORD: ${{ secrets.MAILRU_PASSWORD || secrets.MAILRU_PASS || secrets.MAILRU_APP_PASSWORD || secrets.MAIL_PASSWORD }}
           SYNC_JSONBLOB_URL: ${{ secrets.SYNC_JSONBLOB_URL }}
           MAILRU_WEBLINK: ${{ secrets.MAILRU_WEBLINK }}
           MAILRU_SYNC_NAME: ${{ secrets.MAILRU_SYNC_NAME }}
