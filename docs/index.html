@@ -5437,7 +5437,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         if (!hasToken) {
           tip = onBothost
             ? 'Войдите через Mail.ru (кнопка сверху), чтобы писать sync-state.json в общую папку'
-            : 'Нажмите «Войти Mail.ru», укажите адрес bothost и почту — иначе общий файл в облаке не появится';
+            : 'Нажмите «Войти Mail.ru». Если попросит ссылку бота — это адрес с bothost.ru (не API-ключ), один раз';
           openMailruModal();
         }
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
@@ -5447,7 +5447,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         return false;
       }).catch(function () {
         const tip = !getMailruToken()
-          ? 'Нажмите «Войти Mail.ru» сверху: нужен адрес bothost + почта, иначе файл в Облаке Mail.ru не создаётся'
+          ? 'Войдите через Mail.ru (почта и пароль). Ссылку бота bothost указывают только один раз, если карта её ещё не знает'
           : 'На устройстве сохранено · облако недоступно, повтор…';
         if (!getMailruToken()) openMailruModal();
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
