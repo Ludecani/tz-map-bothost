@@ -14,7 +14,7 @@
       var row = m[idx];
       if (!row || !row.length) return;
       var code = Number(row[0]);
-      if (!(code === 0 || code === 1 || code === 2 || code === 3)) return;
+      if (!(code === 0 || code === 1 || code === 2 || code === 3 || code === 4 || code === 5)) return;
       out.m[String(idx)] = [
         code,
         row[1] != null ? String(row[1]).slice(0, 24) : '',
@@ -62,6 +62,8 @@
     if (c === 1) return 'working';
     if (c === 2) return 'done';
     if (c === 3) return 'base_station';
+    if (c === 4) return 'scheme_clarify';
+    if (c === 5) return 'suv_needed';
     return 'none';
   }
 
@@ -69,6 +71,8 @@
     if (status === 'working') return 1;
     if (status === 'done') return 2;
     if (status === 'base_station') return 3;
+    if (status === 'scheme_clarify') return 4;
+    if (status === 'suv_needed') return 5;
     return 0;
   }
 

@@ -383,7 +383,7 @@ def _normalize_compact(doc):
         except (TypeError, ValueError):
             continue
         # 0 = explicit clear (tombstone); 1/2/3 = active statuses
-        if code not in (0, 1, 2, 3):
+        if code not in (0, 1, 2, 3, 4, 5):
             continue
         by = ""
         at = 0
@@ -490,7 +490,7 @@ def apply_sync_ops(ops, room=None, client=None):
             code = int(op.get("c") if op.get("c") is not None else op.get("code"))
         except (TypeError, ValueError):
             continue
-        if code not in (0, 1, 2, 3):
+        if code not in (0, 1, 2, 3, 4, 5):
             continue
         by = str(op.get("by") or client or "")[:24]
         try:
