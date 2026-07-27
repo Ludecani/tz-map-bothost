@@ -382,11 +382,13 @@ def _normalize_compact(doc):
             code = int(row[0]) if row[0] is not None else 0
         except (TypeError, ValueError):
             continue
-        # 0 = explicit clear (tombstone); 1/2/3 = active statuses
+        # Primary: 0 none/tombstone, 1 working, 2 done.
+        # Legacy exclusive 3/4/5 → primary 0 + flags (BS=1, scheme=2, suv=4).
         if code not in (0, 1, 2, 3, 4, 5):
             continue
         by = ""
         at = 0
+        flags = 0
         if len(row) > 1 and row[1] is not None:
             by = str(row[1])[:24]
         if len(row) > 2:
@@ -394,7 +396,22 @@ def _normalize_compact(doc):
                 at = int(row[2]) or 0
             except (TypeError, ValueError):
                 at = 0
-        out["m"][str(idx)] = [code, by, at]
+        if len(row) > 3:
+            try:
+                flags = int(row[3]) or 0
+            except (TypeError, ValueError):
+                flags = 0
+        if code == 3:
+            code, flags = 0, flags | 1
+        elif code == 4:
+            code, flags = 0, flags | 2
+        elif code == 5:
+            code, flags = 0, flags | 4
+        flags &= 7
+        packed = [code, by, at]
+        if flags:
+            packed.append(flags)
+        out["m"][str(idx)] = packed
     return out
 
 
@@ -497,9 +514,23 @@ def apply_sync_ops(ops, room=None, client=None):
             at = int(op.get("at") or 0) or now
         except (TypeError, ValueError):
             at = now
+        try:
+            flags = int(op.get("f") if op.get("f") is not None else op.get("flags") or 0)
+        except (TypeError, ValueError):
+            flags = 0
+        if code == 3:
+            code, flags = 0, flags | 1
+        elif code == 4:
+            code, flags = 0, flags | 2
+        elif code == 5:
+            code, flags = 0, flags | 4
+        flags &= 7
+        packed = [code, by, at]
+        if flags:
+            packed.append(flags)
         prev = incoming_m.get(idx)
         if not prev or at >= (int(prev[2]) if len(prev) > 2 else 0):
-            incoming_m[idx] = [code, by, at]
+            incoming_m[idx] = packed
     if not incoming_m:
         doc = load_sync_state()
         return doc, 0
