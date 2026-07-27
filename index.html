@@ -2847,8 +2847,16 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019fa26e-f6b1-7567-
           if (remoteStatus === localStatus && remoteFlags === localFlags && remoteAt === localAt && remoteBy === localBy) return;
 
           if (remoteStatus === 'none' && !remoteFlags) {
-            if (local) {
-              delete completedMeta[id];
+            // Keep tombstone with `at` so a lagging Pages/bootstrap snapshot cannot
+            // resurrect an older working/done mark on the next poll (marker blink).
+            if (!local || localStatus !== 'none' || localFlags || localAt !== remoteAt || localBy !== remoteBy) {
+              completedMeta[id] = {
+                status: 'none',
+                f: 0,
+                done: false,
+                by: remoteBy,
+                at: remoteAt
+              };
               changedIds.push(id);
             }
             return;
@@ -3344,8 +3352,14 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019fa26e-f6b1-7567-
       data.forEach(function (item) {
         const st = getWorkStatus(item.id);
         const flags = getWorkFlags(item.id);
-        if (st === 'none' && !flags) return;
         const meta = completedMeta[item.id] || {};
+        if (st === 'none' && !flags) {
+          // Persist tombstones so a later bootstrap/mirror cannot resurrect marks.
+          if (meta.at) {
+            items[item.id] = { status: 'none', f: 0, done: false, by: meta.by || '', at: meta.at };
+          }
+          return;
+        }
         items[item.id] = encodeRemoteMark(st, flags, meta.by || getSyncName(), meta.at || Date.now());
       });
       return items;
@@ -3353,9 +3367,8 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019fa26e-f6b1-7567-
 
     function finishLocalCloudSave(dirtyIds) {
       dirtyIds.forEach(function (id) { clearDirtySync(id); });
-      dirtyIds.forEach(function (id) {
-        if (getWorkStatus(id) === 'none' && !getWorkFlags(id)) delete completedMeta[id];
-      });
+      // Keep none+at tombstones in local meta — deleting them lets a stale mirror
+      // revive the previous status and makes markers blink on every poll.
       clearOutboxIds(dirtyIds);
       saveCompletedMeta();
       saveSyncSnapshot(syncRoom, snapshotItemsFromLocal());
@@ -3769,8 +3782,11 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019fa26e-f6b1-7567-
         pBlob.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pPages.then(function (v) { if (!v) throw new Error('x'); return v; })
       ]).then(function (first) {
-        // Fast first paint only — never prune/snapshot here (partial sources can wipe marks).
-        applyPullResult(first, { prune: false, persist: false });
+        // Fast first paint only from authoritative leaders. Pages mirror can lag and
+        // briefly resurrect cleared marks (visible blink) if applied alone.
+        if (first && first.source && first.source !== 'pages' && first.complete !== false) {
+          applyPullResult(first, { prune: false, persist: false });
+        }
         // Leaders only for authoritative merge. Mail.ru/Mantle no longer on pull hot path.
         return Promise.all([pBothost, pBlob, pPages]).then(function (all) {
           const merged = {};
