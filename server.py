@@ -17,7 +17,7 @@ VIS_BASE = "https://mantledb.sh/v2/visibility/tzmap-public"
 # Local file store — works in RU when jsonblob/Mantle are blocked from the browser.
 SYNC_STATE_PATH = os.path.join(BASE, "data", "sync-state.json")
 SYNC_STATE_LOCK = threading.Lock()
-_EMPTY_SYNC = {"v": 1, "r": "tz-map-novgorod", "t": 0, "m": {}}
+_EMPTY_SYNC = {"v": 1, "r": "tz-map-novgorod", "t": 0, "seq": 0, "m": {}}
 
 # Shared Mail.ru public folder for sync-state.json (participants login to write).
 MAILRU_WEBLINK = os.environ.get("MAILRU_WEBLINK", "fztm/mjzaGLfJv").strip().strip("/")
@@ -254,10 +254,15 @@ def _normalize_compact(doc):
     m = doc.get("m")
     if not isinstance(m, dict):
         m = {}
+    try:
+        seq = int(doc.get("seq") or 0)
+    except (TypeError, ValueError):
+        seq = 0
     out = {
         "v": int(doc.get("v") or 1),
         "r": str(doc.get("r") or _EMPTY_SYNC["r"])[:64],
         "t": int(doc.get("t") or 0),
+        "seq": max(0, seq),
         "m": {},
     }
     for idx, row in m.items():
@@ -267,7 +272,8 @@ def _normalize_compact(doc):
             code = int(row[0]) if row[0] is not None else 0
         except (TypeError, ValueError):
             continue
-        if code not in (1, 2, 3):
+        # 0 = explicit clear (tombstone); 1/2/3 = active statuses
+        if code not in (0, 1, 2, 3):
             continue
         by = ""
         at = 0
@@ -286,11 +292,14 @@ def _merge_compact(remote, local):
     base = _normalize_compact(remote)
     incoming = _normalize_compact(local)
     out_m = dict(base["m"])
+    changed = False
     for idx, loc in incoming["m"].items():
         rem = out_m.get(idx)
         loc_at = int(loc[2]) if len(loc) > 2 else 0
         rem_at = int(rem[2]) if rem and len(rem) > 2 else 0
         if not rem or loc_at >= rem_at:
+            if rem != list(loc):
+                changed = True
             out_m[idx] = list(loc)
     t_vals = [int(base.get("t") or 0), int(incoming.get("t") or 0)]
     for row in out_m.values():
@@ -299,12 +308,71 @@ def _merge_compact(remote, local):
                 t_vals.append(int(row[2]) or 0)
             except (TypeError, ValueError):
                 pass
+    seq = max(int(base.get("seq") or 0), int(incoming.get("seq") or 0))
+    if changed:
+        seq += 1
     return {
         "v": 1,
         "r": incoming.get("r") or base.get("r") or _EMPTY_SYNC["r"],
         "t": max(t_vals) if t_vals else 0,
+        "seq": seq,
         "m": out_m,
     }
+
+
+def apply_sync_ops(ops, room=None, client=None):
+    """Apply a batch of marker ops (append-style) with LWW by `at`. Returns (doc, applied)."""
+    if not isinstance(ops, list):
+        ops = []
+    incoming_m = {}
+    now = int(time.time() * 1000)
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        idx = op.get("i")
+        if idx is None:
+            idx = op.get("idx")
+        if idx is None:
+            continue
+        idx = str(idx)
+        try:
+            code = int(op.get("c") if op.get("c") is not None else op.get("code"))
+        except (TypeError, ValueError):
+            continue
+        if code not in (0, 1, 2, 3):
+            continue
+        by = str(op.get("by") or client or "")[:24]
+        try:
+            at = int(op.get("at") or 0) or now
+        except (TypeError, ValueError):
+            at = now
+        prev = incoming_m.get(idx)
+        if not prev or at >= (int(prev[2]) if len(prev) > 2 else 0):
+            incoming_m[idx] = [code, by, at]
+    if not incoming_m:
+        doc = load_sync_state()
+        return doc, 0
+    payload = {
+        "v": 1,
+        "r": str(room or _EMPTY_SYNC["r"])[:64],
+        "t": now,
+        "m": incoming_m,
+    }
+    # Ensure store is seeded from mirror before merge (same as GET /state).
+    load_sync_state()
+    with SYNC_STATE_LOCK:
+        current = _read_json_file(SYNC_STATE_PATH)
+        if not (current and isinstance(current, dict) and isinstance(current.get("m"), dict)):
+            current = dict(_EMPTY_SYNC)
+            current["m"] = {}
+        before_seq = int(_normalize_compact(current).get("seq") or 0)
+        merged = _merge_compact(current, payload)
+        # ensure seq advances when ops applied even if values identical but re-acked
+        if int(merged.get("seq") or 0) <= before_seq and incoming_m:
+            merged["seq"] = before_seq + 1
+            merged["t"] = max(int(merged.get("t") or 0), now)
+        _write_sync_state_unlocked(merged)
+        return merged, len(incoming_m)
 
 
 def load_sync_state():
@@ -700,8 +768,65 @@ class Handler(SimpleHTTPRequestHandler):
         return ""
 
     def _handle_sync_state(self, method):
-        path = self.path.split("?", 1)[0]
-        if path.rstrip("/") != "/api/sync/state":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/api/sync/ops":
+            if method == "GET":
+                qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                try:
+                    since = int((qs.get("since") or ["0"])[0] or 0)
+                except (TypeError, ValueError):
+                    since = 0
+                doc = load_sync_state()
+                seq = int(doc.get("seq") or 0)
+                self._json_response(
+                    200,
+                    {
+                        "ok": True,
+                        "seq": seq,
+                        "changed": seq > since,
+                        "doc": doc if seq > since or since <= 0 else {"v": 1, "r": doc.get("r"), "t": doc.get("t"), "seq": seq, "m": {}},
+                        "full": seq > since or since <= 0,
+                    },
+                )
+                return True
+            if method in ("PUT", "POST", "PATCH"):
+                raw = self._read_body()
+                try:
+                    body = json.loads(raw.decode("utf-8") or "{}")
+                except Exception:
+                    self._json_response(400, {"error": "invalid json"})
+                    return True
+                if not isinstance(body, dict):
+                    self._json_response(400, {"error": "expected object"})
+                    return True
+                ops = body.get("ops")
+                if ops is None and isinstance(body.get("m"), dict):
+                    # Allow compact doc via /ops as a batch of puts.
+                    ops = []
+                    for idx, row in body["m"].items():
+                        if not isinstance(row, (list, tuple)) or not row:
+                            continue
+                        ops.append(
+                            {
+                                "i": str(idx),
+                                "c": row[0],
+                                "by": row[1] if len(row) > 1 else "",
+                                "at": row[2] if len(row) > 2 else 0,
+                            }
+                        )
+                if not isinstance(ops, list):
+                    self._json_response(400, {"error": "ops_required"})
+                    return True
+                doc, applied = apply_sync_ops(
+                    ops,
+                    room=body.get("r") or body.get("room"),
+                    client=body.get("client") or body.get("by"),
+                )
+                self._json_response(200, {"ok": True, "applied": applied, "seq": doc.get("seq", 0), "doc": doc})
+                return True
+            return False
+
+        if path != "/api/sync/state":
             return False
         if method == "GET":
             self._json_response(200, load_sync_state())
@@ -868,6 +993,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_POST()
 
     def do_PATCH(self):
+        if self._handle_sync_state("PATCH"):
+            return
         if self.path.startswith("/api/sync/rooms/"):
             room = self.path.split("/api/sync/rooms/", 1)[1].split("?", 1)[0]
             body = self._read_body() or None

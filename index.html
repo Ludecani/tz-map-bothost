@@ -4047,6 +4047,11 @@ function bothostStateUrl() {
   return api ? (api + '/api/sync/state') : '';
 }
 
+function bothostOpsUrl() {
+  const api = syncApiOrigin();
+  return api ? (api + '/api/sync/ops') : '';
+}
+
 function mailruApiBase() {
   const api = syncApiOrigin();
   return api ? (api + '/api/mailru') : '';
@@ -4516,7 +4521,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     const SYNC_ROOM_PUBLIC_KEY = 'tz_sync_room_public_v1';
     const SYNC_SNAP_KEY = 'tz_sync_snap_v2';
     const SYNC_BUILD_KEY = 'tz_sync_build_v1';
-    const SYNC_BUILD_STAMP = 'v22.07.13:15';
+    const SYNC_BUILD_STAMP = 'v22.07.27:01';
     const SYNC_OUTBOX_KEY = 'tz_sync_outbox_v1';
     const MAILRU_SESSION_KEY = 'tz_mailru_session_v1';
     const MAILRU_WEBLINK = 'fztm/mjzaGLfJv';
@@ -5284,6 +5289,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
     let syncPushInFlight = false;
     let syncPushAgain = false;
     let syncPushPending = false;
+    let syncLastSeq = 0;
     let syncLastRemoteDoc = null;
     let syncRequestChain = Promise.resolve();
     function enqueueSyncRequest(fn) {
@@ -6079,6 +6085,47 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       return attempt(1).catch(function () { return false; });
     }
 
+    function pushBothostOps(ids) {
+      const url = typeof bothostOpsUrl === 'function' ? bothostOpsUrl() : '';
+      if (!url) return Promise.resolve(false);
+      const ops = [];
+      const want = (ids && ids.length) ? ids : Object.keys(dirtySyncIds);
+      want.forEach(function (id) {
+        const st = getWorkStatus(id);
+        const meta = completedMeta[id] || {};
+        const code = st === 'working' ? 1 : (st === 'done' ? 2 : (st === 'base_station' ? 3 : 0));
+        // Skip idle markers that were never marked (no tombstone needed).
+        if (code === 0 && !meta.at && !isDirtySync(id)) return;
+        ops.push({
+          i: idToSyncIdx(id),
+          c: code,
+          by: String((meta.by || getSyncName() || '')).slice(0, 24),
+          at: Number(meta.at) || Date.now()
+        });
+      });
+      if (!ops.length) {
+        // Nothing dirty — still heartbeat via full state merge.
+        return pushBothostStateSnapshot();
+      }
+      return syncFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ ops: ops, r: syncRoom || 'tz-map-novgorod', client: getSyncName() }),
+        cache: 'no-store',
+        timeout: SYNC_SAVE_MS,
+        retries: 1
+      }).then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json().then(function (body) {
+          if (body && typeof body.seq === 'number') syncLastSeq = body.seq;
+          return !!(body && body.ok !== false);
+        });
+      }).catch(function () {
+        // Older bothost without /ops — fall back to full-state PUT.
+        return pushBothostStateSnapshot();
+      });
+    }
+
     function pushBothostStateSnapshot() {
       const url = typeof bothostStateUrl === 'function' ? bothostStateUrl() : '';
       if (!url) return Promise.resolve(false);
@@ -6113,6 +6160,7 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
                 setTimeout(resolve, 60 + Math.floor(Math.random() * 80) * n);
               }).then(function () { return attempt(n + 1); });
             }
+            if (remote && typeof remote.seq === 'number') syncLastSeq = Math.max(syncLastSeq || 0, remote.seq + 1);
             return true;
           });
         });
@@ -6343,70 +6391,48 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       rememberOutboxIds(allIds);
       setSyncStatus('сохранение…', 'warn');
 
-      // Channels: Mail.ru shared file (login), bothost file store, jsonblob, Mantle.
-      const mailruP = pushMailruSnapshot().catch(function () { return false; });
-      const bothostP = pushBothostStateSnapshot().catch(function () { return false; });
-      const blobP = pushJsonblobSnapshot().catch(function () { return false; });
-      const roomP = pushMantleRoomSnapshot().catch(function () { return false; });
-      const marksP = pushMantleMarksBackground(allIds).catch(function () { return false; });
+      // Phase-0 leader path: bothost (ops) → jsonblob. Mirrors only after success.
+      // Mail.ru / Mantle must never gate "сохранено" — that caused split-brain with colleagues.
+      function mirrorBestEffort() {
+        pushMailruSnapshot().catch(function () { return false; });
+        pushMantleRoomSnapshot().catch(function () { return false; });
+        pushMantleMarksBackground(allIds).catch(function () { return false; });
+      }
 
-      return Promise.all([mailruP, bothostP, blobP, roomP, marksP]).then(function (results) {
-        const mailruOk = !!results[0];
-        const bothostOk = !!results[1];
-        const blobOk = !!results[2];
-        const roomOk = !!results[3];
-        const marksOk = !!results[4];
-        // ONLY jsonblob/bothost count as a real shared save for colleagues.
-        // Mail.ru-only success used to clear dirty while Action later overwrote Mail.ru
-        // from jsonblob — colleague never saw those marks.
-        const authoritativeOk = blobOk || bothostOk;
-        if (authoritativeOk) {
+      return pushBothostOps(allIds).then(function (bothostOk) {
+        if (bothostOk) {
+          // Keep jsonblob warm in background so Pages clients without bothost still converge.
+          pushJsonblobSnapshot().catch(function () { return false; });
           finishLocalCloudSave(allIds);
-          setSyncStatus(blobOk ? 'сохранено · общий канал' : 'сохранено · bothost', 'ok');
-          // Best-effort Mail.ru mirror (does not gate success).
-          if (!mailruOk && getMailruToken()) {
-            setTimeout(function () {
-              pushMailruSnapshot().catch(function () { return false; });
-            }, 1200);
-          }
+          setSyncStatus('сохранено · bothost', 'ok');
+          mirrorBestEffort();
           return true;
         }
-        if (mailruOk) {
-          setSyncStatus('частично · ждём общий канал (jsonblob)', 'warn');
-          showSyncToast('Локально и Mail.ru есть · общий канал ещё пишет, иначе коллега не увидит', 'warn', 7000);
-          if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'Ждём общий канал', 'warn');
-          setTimeout(function () { pushJsonblobSnapshot().then(function (ok) { if (ok) pushSyncState(); }); }, 1000);
-          setTimeout(function () { pushSyncState(); }, 3000);
+        return pushJsonblobSnapshot().then(function (blobOk) {
+          if (blobOk) {
+            finishLocalCloudSave(allIds);
+            setSyncStatus('сохранено · общий канал', 'ok');
+            mirrorBestEffort();
+            return true;
+          }
+          const onBothost = !!syncApiOrigin();
+          setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
+          showSyncToast(
+            onBothost
+              ? 'Bothost/jsonblob недоступны · повтор из очереди…'
+              : 'Общий канал недоступен · повтор… (проверьте сеть / VPN)',
+            'warn',
+            7000
+          );
+          if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
+          // Still try mirrors so at least one channel may catch up — but do NOT clear dirty.
+          mirrorBestEffort();
+          setTimeout(function () { pushSyncState(); }, 1500);
           return false;
-        }
-        if (roomOk || marksOk) {
-          setSyncStatus('частично · ждём общий канал', 'warn');
-          showSyncToast('Локально есть · общий канал ещё пишет, повтор…', 'warn', 5000);
-          if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'Ждём общий канал', 'warn');
-          setTimeout(function () { pushSyncState(); }, 1200);
-          return false;
-        }
-        const onBothost = !!syncApiOrigin();
-        const hasToken = !!getMailruToken();
-        let tip = 'На устройстве сохранено · облако недоступно, повтор…';
-        if (!hasToken) {
-          tip = onBothost
-            ? 'Войдите через Mail.ru (кнопка сверху), чтобы писать sync-state.json в общую папку'
-            : 'Нажмите «Войти Mail.ru» сверху (почта и пароль приложения) — иначе общий файл в облаке не появится';
-          openMailruModal();
-        }
-        setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        showSyncToast(tip, 'warn', 7000);
-        if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
-        setTimeout(function () { pushSyncState(); }, 1500);
-        return false;
+        });
       }).catch(function () {
-        const tip = !getMailruToken()
-          ? 'Войдите через Mail.ru (пароль для внешних приложений), чтобы писать sync-state.json'
-          : 'На устройстве сохранено · облако недоступно, повтор…';
-        if (!getMailruToken()) openMailruModal();
         setSyncStatus('на устройстве · облако недоступно · повтор', 'warn');
-        showSyncToast(tip, 'warn', 7000);
+        showSyncToast('На устройстве сохранено · облако недоступно, повтор…', 'warn', 7000);
         if (allIds.length) showPopupSaveNote(allIds[allIds.length - 1], 'На устройстве · ждём облако', 'warn');
         setTimeout(function () { pushSyncState(); }, 1500);
         return false;
@@ -6441,9 +6467,8 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
         if (!row || !row.length) return;
         const id = idxToMarkerId(idx);
         if (!id) return;
-        const code = Number(row[0]) || 0;
+        const code = Number(row[0]);
         const status = code === 1 ? 'working' : (code === 2 ? 'done' : (code === 3 ? 'base_station' : 'none'));
-        if (status === 'none') return;
         items[id] = {
           status: status,
           done: status === 'done',
@@ -6458,15 +6483,21 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const m = {};
       data.forEach(function (item) {
         const st = getWorkStatus(item.id);
-        if (st === 'none') return;
         const meta = completedMeta[item.id] || {};
+        if (st === 'none') {
+          // Explicit tombstone only when user cleared a mark (dirty) — never bulk-wipe.
+          if (meta.at && isDirtySync(item.id)) {
+            m[idToSyncIdx(item.id)] = [0, String((meta.by || getSyncName() || '')).slice(0, 24), Number(meta.at) || Date.now()];
+          }
+          return;
+        }
         m[idToSyncIdx(item.id)] = [
           st === 'working' ? 1 : (st === 'done' ? 2 : 3),
           String((meta.by || getSyncName() || '')).slice(0, 24),
           Number(meta.at) || Date.now()
         ];
       });
-      return { v: 1, r: syncRoom || 'tz-map-novgorod', t: Date.now(), m: m };
+      return { v: 1, r: syncRoom || 'tz-map-novgorod', t: Date.now(), seq: syncLastSeq || 0, m: m };
     }
 
     function syncFetchOne(url, opts) {
@@ -6581,19 +6612,48 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       }
 
       function readViaBothostState() {
+        const opsUrl = typeof bothostOpsUrl === 'function' ? bothostOpsUrl() : '';
         const url = typeof bothostStateUrl === 'function' ? bothostStateUrl() : '';
-        if (!url) return Promise.reject(new Error('no bothost'));
-        return syncFetch(url + '?_=' + Date.now(), {
-          method: 'GET',
-          headers: { 'Accept': 'application/json' },
-          cache: 'no-store',
-          timeout: SYNC_PULL_FAST_MS,
-          retries: 1
-        }).then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        }).then(function (doc) {
-          return { items: itemsFromCompactDoc(doc), complete: true, source: 'bothost' };
+        if (!url && !opsUrl) return Promise.reject(new Error('no bothost'));
+
+        function fromDoc(doc, source) {
+          if (doc && typeof doc.seq === 'number') {
+            syncLastSeq = Math.max(syncLastSeq || 0, Number(doc.seq) || 0);
+          }
+          return { items: itemsFromCompactDoc(doc), complete: true, source: source || 'bothost' };
+        }
+
+        const viaOps = opsUrl
+          ? syncFetch(opsUrl + '?since=' + encodeURIComponent(String(syncLastSeq || 0)) + '&_=' + Date.now(), {
+              method: 'GET',
+              headers: { 'Accept': 'application/json' },
+              cache: 'no-store',
+              timeout: SYNC_PULL_FAST_MS,
+              retries: 1
+            }).then(function (res) {
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              return res.json();
+            }).then(function (body) {
+              const doc = (body && body.doc) || body;
+              if (!doc || typeof doc !== 'object' || !doc.m) throw new Error('bad ops');
+              return fromDoc(doc, 'bothost');
+            })
+          : Promise.reject(new Error('no ops'));
+
+        return viaOps.catch(function () {
+          if (!url) throw new Error('no bothost');
+          return syncFetch(url + '?_=' + Date.now(), {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            cache: 'no-store',
+            timeout: SYNC_PULL_FAST_MS,
+            retries: 1
+          }).then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+          }).then(function (doc) {
+            return fromDoc(doc, 'bothost');
+          });
         });
       }
 
@@ -6662,8 +6722,8 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
       const pPages = readViaPagesMirror().catch(function () { return null; });
 
       return firstSuccess([
-        pBlob.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pBothost.then(function (v) { if (!v) throw new Error('x'); return v; }),
+        pBlob.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pMailru.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pPages.then(function (v) { if (!v) throw new Error('x'); return v; }),
         pRoom.then(function (v) { if (!v) throw new Error('x'); return v; }),
@@ -6688,24 +6748,27 @@ const SYNC_JSONBLOB_URL = 'https://jsonblob.com/api/jsonBlob/019f86c2-5e38-7c3a-
             mergeItemMaps(merged, r.items);
           });
           if (any) {
-            const src = gotBlob ? 'jsonblob' : (gotBothost ? 'bothost' : (gotMailru ? 'mailru' : (hasLive ? 'mantle' : 'pages')));
-            // Prune ONLY when jsonblob (shared source of truth) was read.
-            // Mail.ru alone can lag behind and previously wiped colleagues' newer marks.
+            const src = gotBothost ? 'bothost' : (gotBlob ? 'jsonblob' : (gotMailru ? 'mailru' : (hasLive ? 'mantle' : 'pages')));
+            // Prune only from leaders (bothost / jsonblob). Mail.ru/Pages alone must never wipe.
+            const canPrune = gotBothost || gotBlob;
             applyPullResult(
-              { items: merged, complete: gotMailru || gotBothost || gotBlob || hasLive, source: src },
-              { prune: gotBlob, persist: true }
+              { items: merged, complete: canPrune || gotMailru || hasLive, source: src },
+              { prune: canPrune, persist: true }
             );
             const n = Object.keys(merged).filter(function (id) {
               return remoteWorkStatus(merged[id]) !== 'none';
             }).length;
-            setSyncStatus((gotBlob ? 'онлайн · jsonblob · ' : 'онлайн · ') + n, gotBlob ? 'ok' : 'warn');
-            // Heal only after a successful jsonblob read — never republish Mail.ru-only state.
-            if (gotBlob && !syncPushInFlight) {
+            const label = gotBothost
+              ? ('онлайн · bothost · ' + n)
+              : (gotBlob ? ('онлайн · jsonblob · ' + n) : ('онлайн · ' + n));
+            setSyncStatus(label, canPrune ? 'ok' : 'warn');
+            // Heal leaders toward each other after a successful authoritative read.
+            if (canPrune && !syncPushInFlight) {
               setTimeout(function () {
-                pushJsonblobSnapshot().catch(function () { return false; });
+                if (gotBothost) pushJsonblobSnapshot().catch(function () { return false; });
+                else pushBothostStateSnapshot().catch(function () { return false; });
               }, 700);
-            } else if (!gotBlob) {
-              // Keep trying the shared channel so colleague marks appear.
+            } else if (!canPrune) {
               setTimeout(function () { pullSyncState(); }, 2500);
             }
           }
