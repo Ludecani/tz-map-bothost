@@ -1,3 +1,5 @@
-data/
+data/sync-state.json
+data/*.tmp
+var/
 __pycache__/
 *.pyc
