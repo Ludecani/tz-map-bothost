@@ -962,14 +962,20 @@ class Handler(SimpleHTTPRequestHandler):
                     for idx, row in body["m"].items():
                         if not isinstance(row, (list, tuple)) or not row:
                             continue
-                        ops.append(
-                            {
-                                "i": str(idx),
-                                "c": row[0],
-                                "by": row[1] if len(row) > 1 else "",
-                                "at": row[2] if len(row) > 2 else 0,
-                            }
-                        )
+                        op = {
+                            "i": str(idx),
+                            "c": row[0],
+                            "by": row[1] if len(row) > 1 else "",
+                            "at": row[2] if len(row) > 2 else 0,
+                        }
+                        if len(row) > 3:
+                            try:
+                                flags = int(row[3]) or 0
+                            except (TypeError, ValueError):
+                                flags = 0
+                            if flags:
+                                op["f"] = flags
+                        ops.append(op)
                 if not isinstance(ops, list):
                     self._json_response(400, {"error": "ops_required"})
                     return True

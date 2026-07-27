@@ -121,9 +121,24 @@ def merge_compact_lww(remote: dict | None, local: dict) -> dict:
                 at = int(row[2] if len(row) > 2 else 0) or 0
             except Exception:
                 at = 0
+            try:
+                flags = int(row[3]) if len(row) > 3 else 0
+            except Exception:
+                flags = 0
+            # Migrate legacy exclusive extras → primary none + flag bits.
+            if code == 3:
+                code, flags = 0, flags | 1
+            elif code == 4:
+                code, flags = 0, flags | 2
+            elif code == 5:
+                code, flags = 0, flags | 4
+            flags &= 7
+            packed = [code, by, at]
+            if flags:
+                packed.append(flags)
             prev = out_m.get(str(idx))
             if not prev or at >= int(prev[2] or 0):
-                out_m[str(idx)] = [code, by, at]
+                out_m[str(idx)] = packed
     t_vals = [int((remote or {}).get("t") or 0), int((local or {}).get("t") or 0)]
     t_vals.extend(int(r[2] or 0) for r in out_m.values())
     return {
