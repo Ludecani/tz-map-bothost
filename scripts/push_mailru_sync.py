@@ -114,7 +114,7 @@ def merge_compact_lww(remote: dict | None, local: dict) -> dict:
                 code = int(row[0])
             except Exception:
                 continue
-            if code not in (0, 1, 2, 3):
+            if code not in (0, 1, 2, 3, 4, 5):
                 continue
             by = str(row[1] if len(row) > 1 else "")[:24]
             try:
