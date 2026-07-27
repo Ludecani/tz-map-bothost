@@ -80,6 +80,60 @@ def fetch_blob(url: str) -> dict:
     return {"v": 1, "r": doc.get("r") or "tz-map-novgorod", "t": int(doc.get("t") or time.time() * 1000), "m": doc["m"]}
 
 
+def fetch_mailru_public(weblink: str, name: str) -> dict | None:
+    for host in ("cloclo52", "cloclo53", "cloclo61", "cloclo64"):
+        url = f"https://{host}.cloud.mail.ru/weblink/view/{weblink}/{name}"
+        st, raw, _ = http(url + "?_=" + str(int(time.time() * 1000)))
+        if st != 200:
+            continue
+        try:
+            doc = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("m"), dict):
+            return {
+                "v": 1,
+                "r": doc.get("r") or "tz-map-novgorod",
+                "t": int(doc.get("t") or 0),
+                "m": doc["m"],
+            }
+    return None
+
+
+def merge_compact_lww(remote: dict | None, local: dict) -> dict:
+    """Union by marker idx; keep row with greater `at`. Never drop a side's marks."""
+    out_m: dict = {}
+    for src in (remote or {}, local or {}):
+        m = src.get("m") if isinstance(src, dict) else None
+        if not isinstance(m, dict):
+            continue
+        for idx, row in m.items():
+            if not isinstance(row, (list, tuple)) or not row:
+                continue
+            try:
+                code = int(row[0])
+            except Exception:
+                continue
+            if code not in (0, 1, 2, 3):
+                continue
+            by = str(row[1] if len(row) > 1 else "")[:24]
+            try:
+                at = int(row[2] if len(row) > 2 else 0) or 0
+            except Exception:
+                at = 0
+            prev = out_m.get(str(idx))
+            if not prev or at >= int(prev[2] or 0):
+                out_m[str(idx)] = [code, by, at]
+    t_vals = [int((remote or {}).get("t") or 0), int((local or {}).get("t") or 0)]
+    t_vals.extend(int(r[2] or 0) for r in out_m.values())
+    return {
+        "v": 1,
+        "r": (local or {}).get("r") or (remote or {}).get("r") or "tz-map-novgorod",
+        "t": max(t_vals) if t_vals else int(time.time() * 1000),
+        "m": out_m,
+    }
+
+
 def upload_hash(token: str, content: bytes) -> str:
     q = urllib.parse.urlencode({"client_id": CLIENT_ID, "token": token})
     shards = []
@@ -368,6 +422,15 @@ def main() -> int:
     name = (os.environ.get("MAILRU_SYNC_NAME") or DEFAULT_NAME).strip()
 
     doc = fetch_blob(blob_url)
+    mail = fetch_mailru_public(weblink, name)
+    if mail:
+        before = len(doc.get("m") or {})
+        doc = merge_compact_lww(mail, doc)
+        print(
+            f"merged mailru+blob marks={len(doc['m'])} (blob_was={before}, mail_was={len(mail.get('m') or {})})"
+        )
+    else:
+        print("mailru public read skipped/empty — uploading blob as-is")
     payload = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     print(f"blob marks={len(doc['m'])} bytes={len(payload)}")
 
