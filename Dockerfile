@@ -5,11 +5,15 @@ EXPOSE 3000 8080
 COPY server.py .
 COPY requirements.txt .
 COPY bot.py .
-RUN mkdir -p build data docs
+RUN mkdir -p build data docs js var
 COPY index.html ./build/index.html
 COPY sync-mirror.json ./sync-mirror.json
 COPY sync-api.json ./sync-api.json
 COPY docs/sync-mirror.json ./docs/sync-mirror.json
 COPY docs/sync-api.json ./docs/sync-api.json
 COPY sync-api.json ./build/sync-api.json
+COPY data ./build/data
+COPY data ./data
+COPY js ./build/js
+COPY js ./js
 CMD ["python", "-u", "server.py"]

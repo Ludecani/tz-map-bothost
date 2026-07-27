@@ -88,36 +88,37 @@ Discovery API (как сейчас): `sync-api.json` / `_api` в jsonblob → `a
 
 ## План внедрения (без простоя)
 
-### Фаза 0 — уже в этом PR
+### Фаза 0 — сделано
 
 - Документ архитектуры.
 - Сервер: `POST/GET /api/sync/ops` + поле `seq` в состоянии.
-- Клиент: запись **сначала bothost, потом jsonblob**; Mail.ru/Mantle только mirror после успеха; prune только после jsonblob/bothost.
+- Клиент: запись **сначала bothost, потом jsonblob**.
 
-### Фаза 1 — стабилизация (следующий шаг)
+### Фаза 1 — сделано
 
-- Bothost при старте и каждые N минут: sync-state → jsonblob + (опц.) триггер Mail.ru Action.
-- Убрать клиентскую запись в Mail.ru/Mantle из hot path (оставить кнопку «зеркалировать» для отладки).
-- Явный `status: none` в compact `m` (tombstone), prune по tombstone, не по отсутствию ключа.
+- Bothost при старте и каждые ~2 мин: state → jsonblob + локальный `sync-mirror.json`.
+- Клиентская запись в Mail.ru/Mantle убрана из hot path (save/pull).
+- Снятие статуса — tombstone `c:0`; **prune по отсутствию ключа отключён**.
+- Runtime state хранится в `var/sync-state.json` (не в `data/`).
 
-### Фаза 2 — разборка монолита
+### Фаза 2 — в процессе
 
 ```
-index.html          → оболочка + Leaflet UI
-js/sync.js          → движок sync (ops/outbox/poll)
-data/markers.json   → MARKERS
-data/observations.json
-data/tz-docs.json
+index.html              → оболочка + Leaflet UI
+js/sync-core.js         → LWW merge helpers
+data/markers.js         → MARKERS
+data/observations.js
+data/tz-docs.js
+scripts/publish_static.py → копирует в docs/ + build/
 ```
 
-Сборка в `build/` + `docs/` для Pages. Правки маркеров больше не рискуют стереть sync/OBSERVATIONS.
+Полный вынос UI-связанного sync-движка в `js/sync.js` — следующий шаг.
 
-### Фаза 3 — UX «ничего не ломается»
+### Фаза 3 — частично сделано
 
-- Build stamp + `Cache-Control: no-store` для `index.html` / `sync-*.json`.
-- При смене `SYNC_BUILD_STAMP` — сброс только snap-кэша, не outbox.
-- Индикатор: `онлайн · bothost · seq N` / `деград · jsonblob` / `офлайн · outbox K`.
-- Один канонический URL (без `/m/` плясок): Pages + bothost отдают один и тот же билд.
+- Build stamp `v22.07.27:10` + `Cache-Control: no-store` на html/js/json.
+- При смене stamp — сброс только snap, outbox сохраняется.
+- Индикатор: `онлайн · bothost · N · seq …` / `офлайн · очередь K`.
 
 ---
 
