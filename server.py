@@ -30,7 +30,7 @@ MAILRU_DISPATCH_U = "https://dispatcher.cloud.mail.ru/u"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SYNC_JSONBLOB_URL = os.environ.get(
     "SYNC_JSONBLOB_URL",
-    "https://jsonblob.com/api/jsonBlob/019fa26e-f6b1-7567-a8e8-b73a5f63814a",
+    "https://jsonblob.com/api/jsonBlob/019fb180-4cd3-79d3-a29e-b5593d2d97be",
 ).strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "Ludecani/tz-map-bothost").strip()
 
@@ -144,6 +144,27 @@ def mirror_sync_state_to_jsonblob(local_doc=None):
     local = _normalize_compact(local_doc if local_doc is not None else load_sync_state())
     try:
         st, remote, _, headers = _http_json(SYNC_JSONBLOB_URL, timeout=20)
+        if st == 404:
+            # Free jsonblob IDs expire; recreate with current local state.
+            body = json.dumps(local, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            post = urllib.request.Request(
+                "https://jsonblob.com/api/jsonBlob",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": UA,
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(post, timeout=25) as resp:
+                loc = resp.headers.get("Location") or resp.headers.get("location") or ""
+                blob_id = resp.headers.get("X-jsonblob-id") or resp.headers.get("x-jsonblob-id") or ""
+                print(
+                    f"jsonblob recreated after 404 loc={loc or blob_id} marks={len(local.get('m') or {})}",
+                    flush=True,
+                )
+                return resp.status in (200, 201)
         if st != 200 or not isinstance(remote, dict) or not isinstance(remote.get("m"), dict):
             # Do not create a blind overwrite if GET failed.
             print(f"jsonblob mirror skipped: GET status={st}", flush=True)
