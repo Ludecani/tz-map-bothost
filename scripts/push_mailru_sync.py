@@ -25,7 +25,7 @@ CLIENT_ID = "cloud-win"
 OAUTH_URL = "https://o2.mail.ru/token"
 API = "https://cloud.mail.ru/api/v2"
 DEFAULT_BLOB = "https://jsonblob.com/api/jsonBlob/019fbf6a-2f22-72bc-8454-59804db53581"
-DEFAULT_CRED_BLOB = "https://jsonblob.com/api/jsonBlob/019f8951-a116-7703-af0b-29e3d0e5845b"
+DEFAULT_CRED_BLOB = "https://jsonblob.com/api/jsonBlob/019fbf6a-2f22-72bc-8454-59804db53581"
 DEFAULT_WEBLINK = "fztm/mjzaGLfJv"
 DEFAULT_NAME = "sync-state.json"
 
