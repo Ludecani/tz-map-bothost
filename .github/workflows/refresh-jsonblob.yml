@@ -1,0 +1,48 @@
+name: Refresh jsonblob sync channel
+
+# Free jsonblob IDs expire ~24h. Keep a live URL in sync-api.json so Pages clients
+# can save/pull without waiting for a manual redeploy.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "sync-mirror.json"
+      - "docs/sync-mirror.json"
+      - "scripts/refresh_jsonblob.py"
+      - ".github/workflows/refresh-jsonblob.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ensure writable jsonblob + update sync-api.json
+        run: python3 scripts/refresh_jsonblob.py
+      - name: Commit updated sync URLs if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- sync-api.json docs/sync-api.json build/sync-api.json \
+              index.html docs/index.html build/index.html \
+              server.py build/server.py scripts/push_mailru_sync.py \
+              sync-mirror.json docs/sync-mirror.json build/sync-mirror.json; then
+            echo "No sync URL changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sync-api.json docs/sync-api.json build/sync-api.json \
+            index.html docs/index.html build/index.html \
+            server.py build/server.py scripts/push_mailru_sync.py \
+            sync-mirror.json docs/sync-mirror.json build/sync-mirror.json || true
+          git commit -m "chore: refresh jsonblob sync channel" || exit 0
+          git push
