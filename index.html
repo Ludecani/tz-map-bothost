@@ -683,9 +683,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
 //# sourceMappingURL=leaflet.js.map
 </script>
   <script src="js/sync-core.js?v=220727100"></script>
-  <script src="data/markers.js?v=220727140"></script>
-  <script src="data/observations.js?v=220727140"></script>
-  <script src="data/tz-docs.js?v=220727140"></script>
+  <script src="data/markers.js?v=220727145"></script>
+  <script src="data/observations.js?v=220727145"></script>
+  <script src="data/tz-docs.js?v=220727145"></script>
   <script>
 // Sovmestnaya sinhronizaciya otmetok (MantleDB) — open namespace (browser-writable)
 const MAP_SYNC_DIRECT = 'https://mantledb.sh/v2/tzmap-public';
@@ -1147,7 +1147,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
-      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.27:140</span>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.07.27:145</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -1321,7 +1321,7 @@ function adoptJsonblobUrl(url) {
     const SYNC_ROOM_PUBLIC_KEY = 'tz_sync_room_public_v1';
     const SYNC_SNAP_KEY = 'tz_sync_snap_v2';
     const SYNC_BUILD_KEY = 'tz_sync_build_v1';
-    const SYNC_BUILD_STAMP = 'v22.07.27:140';
+    const SYNC_BUILD_STAMP = 'v22.07.27:145';
     const SYNC_OUTBOX_KEY = 'tz_sync_outbox_v1';
     const MAILRU_SESSION_KEY = 'tz_mailru_session_v1';
     const MAILRU_WEBLINK = 'fztm/mjzaGLfJv';
@@ -4789,6 +4789,32 @@ function adoptJsonblobUrl(url) {
       applyFilters(true);
     }
 
+
+    const CORE_DISTRICTS = {
+      'Маловишерский': true,
+      'Новгородский': true,
+      'Чудовский': true
+    };
+
+    function fitVisibleMarkers(visibleMarkers) {
+      // "Все районы": keep the usual Novgorod cluster in view.
+      // Far districts (Шимский/Батецкий/Пестовский/…) stay on the map
+      // but must not yank the viewport across the whole oblast.
+      let forFit = visibleMarkers || [];
+      if (districtFilter === 'all' && forFit.length) {
+        const core = [];
+        markerMap.forEach(function (entry) {
+          if (!CORE_DISTRICTS[entry.item.d]) return;
+          if (forFit.indexOf(entry.marker) >= 0) core.push(entry.marker);
+        });
+        if (core.length) forFit = core;
+      }
+      if (!forFit.length) return;
+      try {
+        map.fitBounds(L.featureGroup(forFit).getBounds().pad(0.08), { maxZoom: 12, animate: false });
+      } catch (e) {}
+    }
+
     function applyFilters(refitMap) {
       const visibleMarkers = [];
       markerMap.forEach(({ marker, item }) => {
@@ -4802,7 +4828,7 @@ function adoptJsonblobUrl(url) {
         }
       });
       if (refitMap && visibleMarkers.length && !isMobileLayout()) {
-        map.fitBounds(L.featureGroup(visibleMarkers).getBounds().pad(0.08));
+        fitVisibleMarkers(visibleMarkers);
       }
       raiseObjectMarkers();
     }
@@ -5222,7 +5248,7 @@ function adoptJsonblobUrl(url) {
     });
 
     updateStats();
-    map.fitBounds(L.featureGroup([...markerMap.values()].map(v => v.marker)).getBounds().pad(0.08));
+    fitVisibleMarkers([...markerMap.values()].map(function (v) { return v.marker; }));
     setTimeout(function () { try { map.invalidateSize(); } catch (e) {} }, 200);
 
     document.querySelectorAll('.district-filter').forEach(btn => {
