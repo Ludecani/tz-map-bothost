@@ -6,7 +6,9 @@ name: Refresh jsonblob sync channel
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */12 * * *"
+    # Free jsonblob TTL ~24h; refresh often so Pages mirror/Mantle stay warm
+    # without waiting for a manual redeploy when marks stop syncing.
+    - cron: "20 */2 * * *"
   push:
     branches: [main]
     paths:

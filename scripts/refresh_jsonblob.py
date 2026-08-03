@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Ensure Pages has a writable jsonblob URL (free IDs expire ~24h)."""
+"""Keep Pages sync channel alive: jsonblob + Mantle + sync-mirror.
+
+Free jsonblob IDs expire ~24h. This job:
+1) prefers the live blob as the seed (not a stale local mirror),
+2) merges Mantle `_compact` and the Pages mirror (LWW by `at`),
+3) refreshes/recreates the blob,
+4) writes sync-api.json + sync-mirror.json for GitHub Pages,
+5) publishes `_jsonblob` + `_compact` to Mantle so peers discover the channel
+   without waiting for a manual redeploy.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +20,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-UA = "tz-map-refresh-jsonblob/1.0"
+UA = "tz-map-refresh-jsonblob/1.1"
 BLOB_RE = re.compile(r"https://jsonblob\.com/api/jsonBlob/[0-9a-f-]+", re.I)
+MANTLE_ROOM = "https://mantledb.sh/v2/tzmap-public/rooms/tz-map-novgorod"
+PAGES_MIRROR = "https://ludecani.github.io/tz-map-bothost/sync-mirror.json"
 
 
 def http_json(url: str, method: str = "GET", body: bytes | None = None, timeout: int = 30):
@@ -37,35 +48,109 @@ def http_json(url: str, method: str = "GET", body: bytes | None = None, timeout:
         return e.code, parsed, dict(e.headers or {})
 
 
-def load_seed() -> dict:
-    candidates = [
+def empty_doc() -> dict:
+    return {"v": 1, "r": "tz-map-novgorod", "t": 0, "seq": 0, "m": {}}
+
+
+def as_compact(doc) -> dict | None:
+    if not isinstance(doc, dict):
+        return None
+    if isinstance(doc.get("m"), dict):
+        return doc
+    compact = doc.get("_compact")
+    if isinstance(compact, dict) and isinstance(compact.get("m"), dict):
+        return compact
+    return None
+
+
+def merge_compact(a: dict, b: dict) -> dict:
+    """LWW merge by row `at` (index 2)."""
+    out_m: dict = {}
+    for src in (a, b):
+        for idx, row in (src.get("m") or {}).items():
+            if not isinstance(row, list) or not row:
+                continue
+            key = str(idx)
+            prev = out_m.get(key)
+            at = int(row[2]) if len(row) > 2 else 0
+            prev_at = int(prev[2]) if prev and len(prev) > 2 else 0
+            if not prev or at >= prev_at:
+                out_m[key] = list(row)
+    return {
+        "v": 1,
+        "r": (b.get("r") or a.get("r") or "tz-map-novgorod"),
+        "t": max(int(a.get("t") or 0), int(b.get("t") or 0), int(time.time() * 1000)),
+        "seq": max(int(a.get("seq") or 0), int(b.get("seq") or 0)),
+        "m": out_m,
+    }
+
+
+def fetch_live_blob(url: str) -> dict | None:
+    if not url:
+        return None
+    try:
+        st, remote, _ = http_json(url + f"?_={int(time.time())}")
+    except Exception:
+        return None
+    if st == 200:
+        return as_compact(remote)
+    return None
+
+
+def fetch_mantle_compact() -> tuple[dict | None, dict | None]:
+    """Return (compact, full_room_or_None)."""
+    try:
+        st, room, _ = http_json(MANTLE_ROOM + f"?_={int(time.time())}")
+    except Exception:
+        return None, None
+    if st != 200 or not isinstance(room, dict):
+        return None, None
+    return as_compact(room), room
+
+
+def fetch_pages_mirror() -> dict | None:
+    try:
+        st, live, _ = http_json(PAGES_MIRROR + f"?_={int(time.time())}")
+    except Exception:
+        return None
+    if st == 200:
+        return as_compact(live)
+    return None
+
+
+def load_local_seed() -> dict:
+    for path in (
         ROOT / "sync-mirror.json",
         ROOT / "docs" / "sync-mirror.json",
         ROOT / "build" / "sync-mirror.json",
-    ]
-    seed = {"v": 1, "r": "tz-map-novgorod", "t": 0, "seq": 0, "m": {}}
-    for path in candidates:
+    ):
         if not path.exists():
             continue
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if isinstance(doc, dict) and isinstance(doc.get("m"), dict):
-            seed = doc
-            break
-    # Prefer live Pages mirror when richer/newer.
-    try:
-        st, live, _ = http_json(
-            f"https://ludecani.github.io/tz-map-bothost/sync-mirror.json?_={int(time.time())}"
-        )
-        if st == 200 and isinstance(live, dict) and isinstance(live.get("m"), dict):
-            if len(live["m"]) >= len(seed.get("m") or {}) or int(live.get("t") or 0) >= int(
-                seed.get("t") or 0
-            ):
-                seed = live
-    except Exception:
-        pass
+        compact = as_compact(doc)
+        if compact:
+            return compact
+    return empty_doc()
+
+
+def load_seed(blob_url: str) -> dict:
+    """Prefer live blob, then Mantle, then Pages mirror, then local files."""
+    seed = empty_doc()
+    sources: list[tuple[str, dict | None]] = [
+        ("blob", fetch_live_blob(blob_url)),
+        ("mantle", fetch_mantle_compact()[0]),
+        ("pages", fetch_pages_mirror()),
+        ("local", load_local_seed()),
+    ]
+    for name, doc in sources:
+        if not doc:
+            print(f"seed:{name}=miss")
+            continue
+        print(f"seed:{name}=marks:{len(doc.get('m') or {})} seq={doc.get('seq')} t={doc.get('t')}")
+        seed = merge_compact(seed, doc) if seed.get("m") else merge_compact(empty_doc(), doc)
     seed["t"] = max(int(seed.get("t") or 0), int(time.time() * 1000))
     seed["seq"] = max(int(seed.get("seq") or 0), 1)
     return seed
@@ -126,7 +211,6 @@ def replace_urls(old: str, new: str) -> None:
         if old:
             updated = updated.replace(old, new)
         updated = BLOB_RE.sub(new, updated)
-        # Keep DEFAULT assignment coherent if present as bare const.
         if "SYNC_JSONBLOB_URL_DEFAULT" in updated:
             updated = re.sub(
                 r"(const SYNC_JSONBLOB_URL_DEFAULT\s*=\s*')[^']+(')",
@@ -173,9 +257,38 @@ def write_mirrors(doc: dict) -> None:
         path.write_text(text, encoding="utf-8")
 
 
+def publish_mantle(url: str, compact: dict) -> bool:
+    """Publish live blob URL + compact snapshot into Mantle room (read-merge-write)."""
+    try:
+        st, room, _ = http_json(MANTLE_ROOM + f"?_={int(time.time())}")
+    except Exception as exc:
+        print(f"mantle read failed: {exc}")
+        return False
+    doc = room if (st == 200 and isinstance(room, dict)) else {}
+    if not isinstance(doc, dict):
+        doc = {}
+    prev = as_compact(doc) or empty_doc()
+    merged = merge_compact(prev, compact)
+    out = dict(doc)
+    out["v"] = out.get("v") or 3
+    out["updatedAt"] = int(time.time() * 1000)
+    out["_jsonblob"] = url
+    out["_jsonblobAt"] = int(time.time() * 1000)
+    out["_compact"] = merged
+    body = json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        st2, _, _ = http_json(MANTLE_ROOM, method="POST", body=body, timeout=40)
+    except Exception as exc:
+        print(f"mantle write failed: {exc}")
+        return False
+    ok = st2 in (200, 201)
+    print(f"mantle publish status={st2} marks={len(merged.get('m') or {})}")
+    return ok
+
+
 def main() -> int:
-    seed = load_seed()
     old = current_url()
+    seed = load_seed(old)
     print(f"current={old or '(none)'} seed_keys={len(seed.get('m') or {})}")
     url = old
     alive = False
@@ -183,26 +296,10 @@ def main() -> int:
         st, remote, _ = http_json(old + f"?_={int(time.time())}")
         if st == 200 and isinstance(remote, dict) and isinstance(remote.get("m"), dict):
             alive = True
-            # Keep blob warm and merge latest mirror seed (inline LWW by `at`).
-            out_m = dict(remote.get("m") or {})
-            for idx, row in (seed.get("m") or {}).items():
-                if not isinstance(row, list) or not row:
-                    continue
-                prev = out_m.get(str(idx))
-                at = int(row[2]) if len(row) > 2 else 0
-                prev_at = int(prev[2]) if prev and len(prev) > 2 else 0
-                if not prev or at >= prev_at:
-                    out_m[str(idx)] = list(row)
-            merged = {
-                "v": 1,
-                "r": seed.get("r") or remote.get("r") or "tz-map-novgorod",
-                "t": max(int(seed.get("t") or 0), int(remote.get("t") or 0), int(time.time() * 1000)),
-                "seq": max(int(seed.get("seq") or 0), int(remote.get("seq") or 0)),
-                "m": out_m,
-            }
+            merged = merge_compact(remote, seed)
             if put_blob(old, merged):
                 seed = merged
-                print(f"refreshed existing blob marks={len(out_m)}")
+                print(f"refreshed existing blob marks={len(seed.get('m') or {})}")
             else:
                 print("warn: put failed; will recreate")
                 alive = False
@@ -214,6 +311,7 @@ def main() -> int:
     write_sync_api(url)
     write_mirrors(seed)
     replace_urls(old, url)
+    publish_mantle(url, seed)
     print(f"done url={url} marks={len(seed.get('m') or {})}")
     return 0
 
