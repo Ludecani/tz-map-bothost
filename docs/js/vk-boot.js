@@ -17,27 +17,38 @@
     return false;
   }
 
-  function init() {
-    var bridge = window.vkBridge || window.vkConnect;
-    if (!bridge || typeof bridge.send !== 'function') return;
+  function markShell() {
+    if (!isVkShell()) return false;
     try {
-      bridge.send('VKWebAppInit', {});
+      document.documentElement.classList.add('vk-shell');
+      if (document.body) document.body.classList.add('vk-shell');
     } catch (e) {}
-    try {
-      if (typeof bridge.subscribe === 'function') {
-        bridge.subscribe(function () {});
-      }
-    } catch (e) {}
-    // Help Leaflet reflow after VK chrome settles.
-    setTimeout(function () {
-      try {
-        window.dispatchEvent(new Event('resize'));
-      } catch (e) {}
-    }, 400);
+    return true;
   }
 
-  if (!isVkShell() && !(window.vkBridge || window.vkConnect)) {
-    // Still attempt init if bridge script loaded (harmless outside VK).
+  function invalidateMapSoon() {
+    setTimeout(function () {
+      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    }, 120);
+    setTimeout(function () {
+      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    }, 500);
+  }
+
+  function init() {
+    markShell();
+    var bridge = window.vkBridge || window.vkConnect;
+    if (bridge && typeof bridge.send === 'function') {
+      try { bridge.send('VKWebAppInit', {}); } catch (e) {}
+      try {
+        if (typeof bridge.subscribe === 'function') bridge.subscribe(function () {});
+      } catch (e) {}
+    }
+    invalidateMapSoon();
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', invalidateMapSoon);
+      window.visualViewport.addEventListener('scroll', invalidateMapSoon);
+    }
   }
 
   if (document.readyState === 'loading') {
@@ -45,4 +56,6 @@
   } else {
     init();
   }
+  // Class as early as possible for CSS.
+  markShell();
 })();
