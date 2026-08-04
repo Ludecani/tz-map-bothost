@@ -871,6 +871,20 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
     button.done-filter-extra.active { border-style: solid; }
     .work-filter-row { flex-wrap: wrap; overflow: visible; }
     .work-status-btns { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+    .work-status-btns.ws-primary {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+    }
+    .work-status-btns.ws-primary .ws-btn { width: auto; min-width: 0; padding: 8px 6px; font-size: 12px; }
+    .ws-extra-wrap { margin-top: 6px; }
+    .ws-extra-wrap > summary {
+      cursor: pointer; font-size: 12px; font-weight: 700; color: #4b5563; padding: 6px 0;
+      list-style: none; user-select: none;
+    }
+    .ws-extra-wrap > summary::-webkit-details-marker { display: none; }
+    .panel-close-btn {
+      display: none; width: 100%; margin-top: 8px; min-height: 42px;
+      font-weight: 700; background: #111827; color: #fff; border-color: #111827;
+    }
     .ws-btn {
       width: 100%; text-align: center; min-height: 34px; padding: 7px 10px;
       font-weight: 600; font-size: 12px; touch-action: manipulation;
@@ -1133,26 +1147,94 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       .addr-links { flex-direction: column; }
       .leaflet-popup-content-wrapper { max-width: min(94vw, 400px) !important; }
       .leaflet-popup-content { max-height: 58vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-      .ws-btn { min-height: 48px; font-size: 14px; padding: 12px 14px; }
-      .work-status-btns { gap: 10px; }
+      .ws-btn { min-height: 44px; font-size: 13px; padding: 10px 8px; }
+      .work-status-btns.ws-primary { gap: 6px; }
+      .work-status-btns.ws-extra { gap: 8px; }
       .leaflet-control-zoom a { width: 36px !important; height: 36px !important; line-height: 36px !important; font-size: 18px !important; }
       .leaflet-bar { border-radius: 8px !important; }
+      .panel-close-btn { display: block; }
+      .header-top .build-stamp,
+      .header-top .stats,
+      .header-top .note#count { display: none; }
+      .header-top { flex-wrap: nowrap; gap: 8px; }
+      .header-top h1 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mailru-login-top { min-height: 36px; padding: 6px 10px; font-size: 12px; }
+      .controls-panel.open {
+        max-height: min(42vh, 340px);
+      }
+      .legend { display: none; }
+      .leaflet-popup-content { max-height: 52vh; }
+    }
+    /* VK Mini App (desktop iframe + phone): always use compact manage UI */
+    html.vk-shell body,
+    body.vk-shell {
+      height: 100%;
+      max-height: 100%;
+      overflow: hidden;
+    }
+    body.vk-shell header {
+      padding: 6px 10px;
+      padding-top: max(6px, env(safe-area-inset-top));
+      gap: 4px;
+    }
+    body.vk-shell .header-top .build-stamp,
+    body.vk-shell .header-top .stats,
+    body.vk-shell .header-top .note#count { display: none !important; }
+    body.vk-shell .header-top {
+      flex-wrap: nowrap;
+      gap: 8px;
+    }
+    body.vk-shell .header-top h1 {
+      font-size: 14px;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    body.vk-shell .panel-toggle {
+      display: inline-flex !important;
+      margin-left: auto;
+      min-height: 36px;
+    }
+    body.vk-shell .controls-panel {
+      display: none !important;
+    }
+    body.vk-shell .controls-panel.open {
+      display: block !important;
+      max-height: min(38vh, 300px);
+      overflow-y: auto;
+      border-top: 1px solid #f3f4f6;
+      padding-top: 8px;
+    }
+    body.vk-shell .legend { display: none !important; }
+    body.vk-shell .panel-close-btn { display: block; }
+    body.vk-shell .coverage-row .note { display: none; }
+    body.vk-shell .work-filter-row .done-filter {
+      flex: 1 1 calc(50% - 4px);
+      min-width: 110px;
+      min-height: 40px;
+    }
+    body.vk-shell .leaflet-popup-content {
+      max-height: 48vh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     @media (min-width: 769px) {
-      .controls-panel { display: block !important; }
+      body:not(.vk-shell) .controls-panel { display: block !important; }
     }
   </style>
   <!-- VK Mini App boot: required so vk.com/app* leaves the loading state -->
-  <script src="js/vk-bridge.min.js?v=220804002"></script>
-  <script src="js/vk-access-config.js?v=220804002"></script>
-  <script src="js/vk-access.js?v=220804002"></script>
-  <script src="js/vk-boot.js?v=220804002"></script>
+  <script src="js/vk-bridge.min.js?v=220804003"></script>
+  <script src="js/vk-access-config.js?v=220804003"></script>
+  <script src="js/vk-access.js?v=220804003"></script>
+  <script src="js/vk-boot.js?v=220804003"></script>
 </head>
 <body>
   <header>
     <div class="header-top">
       <h1>ТЗ — карта объектов</h1>
-      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.08.04:vk2</span>
+      <span id="build-stamp" class="build-stamp" title="Версия live-карты. Если метка другая — это старый кэш.">v22.08.04:vk3</span>
       <button type="button" id="mailru-login-btn-top" class="mailru-login-top" title="Войти через Mail.ru">Войти Mail.ru</button>
       <button type="button" id="mailru-logout-btn-top" class="mailru-login-top" style="display:none">Выйти</button>
       <span id="mailru-user-top" class="mailru-user-top" style="display:none"></span>
@@ -1161,6 +1243,7 @@ const OPERATOR_TOWERS = [{"lat":58.540035,"lon":31.302752,"op":"shared","opConfi
       <button type="button" class="panel-toggle" id="panel-toggle" aria-expanded="false" aria-controls="controls-panel">Фильтры ▾</button>
     </div>
     <div id="controls-panel" class="controls-panel">
+    <button type="button" class="panel-close-btn" id="panel-close-btn">Готово — к карте</button>
     <div class="toolbar">
       <div class="toolbar-row">
         <div class="legend">
@@ -4634,18 +4717,20 @@ function adoptJsonblobUrl(url) {
       }
       return (
         '<div class="status-row">' +
-          '<div class="row-title">Основной статус</div>' +
-          '<div class="work-status-btns">' +
+          '<div class="row-title">Статус</div>' +
+          '<div class="work-status-btns ws-primary">' +
             btn('none', 'Не начато') +
             btn('working', 'В работе') +
             btn('done', 'Готово') +
           '</div>' +
-          '<div class="ws-extra-title">Дополнительно (можно несколько)</div>' +
-          '<div class="work-status-btns">' +
-            flagBtn('base_station', 'Необходима базовая станция') +
-            flagBtn('scheme_clarify', 'Требуется уточнение схемы') +
-            flagBtn('suv_needed', 'Нужен внедорожник') +
-          '</div>' +
+          '<details class="ws-extra-wrap">' +
+            '<summary>Дополнительно ▾</summary>' +
+            '<div class="work-status-btns ws-extra">' +
+              flagBtn('base_station', 'Нужна БС') +
+              flagBtn('scheme_clarify', 'Уточнить схему') +
+              flagBtn('suv_needed', 'Внедорожник') +
+            '</div>' +
+          '</details>' +
         '</div>'
       );
     }
@@ -4734,17 +4819,25 @@ function adoptJsonblobUrl(url) {
       return districtOk && statusOk && obslOk;
     }
 
+    function isVkShellLayout() {
+      try {
+        return document.body.classList.contains('vk-shell') ||
+          document.documentElement.classList.contains('vk-shell');
+      } catch (e) { return false; }
+    }
+
     function isMobileLayout() {
-      return window.matchMedia('(max-width: 768px)').matches;
+      return isVkShellLayout() || window.matchMedia('(max-width: 768px)').matches;
     }
 
     function popupOptions() {
       const mobile = isMobileLayout();
+      const vk = isVkShellLayout();
       return {
-        maxWidth: mobile ? Math.min(320, window.innerWidth - 24) : 300,
-        minWidth: mobile ? 220 : 240,
-        autoPanPaddingTopLeft: mobile ? [10, 10] : [12, 12],
-        autoPanPaddingBottomRight: mobile ? [10, 10] : [12, 12],
+        maxWidth: mobile ? Math.min(340, window.innerWidth - 20) : 300,
+        minWidth: mobile ? 210 : 240,
+        autoPanPaddingTopLeft: vk ? [12, 56] : (mobile ? [10, 48] : [12, 12]),
+        autoPanPaddingBottomRight: mobile ? [10, 16] : [12, 12],
         closeOnClick: !mobile,
         autoClose: true
       };
@@ -4753,6 +4846,7 @@ function adoptJsonblobUrl(url) {
     function initMobileUi(map) {
       const toggle = document.getElementById('panel-toggle');
       const panel = document.getElementById('controls-panel');
+      const closeBtn = document.getElementById('panel-close-btn');
       if (!toggle || !panel) return;
 
       function setPanelOpen(open) {
@@ -4766,12 +4860,13 @@ function adoptJsonblobUrl(url) {
         setPanelOpen(!panel.classList.contains('open'));
       });
 
-      panel.querySelectorAll('button').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          if (isMobileLayout()) setTimeout(function () { setPanelOpen(false); }, 80);
+      if (closeBtn) {
+        closeBtn.addEventListener('click', function () {
+          setPanelOpen(false);
         });
-      });
+      }
 
+      // Do NOT auto-close after every filter tap — that made VK manage UX painful.
       map.on('click', function () {
         if (isMobileLayout() && panel.classList.contains('open')) setPanelOpen(false);
       });
