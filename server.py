@@ -30,7 +30,7 @@ MAILRU_DISPATCH_U = "https://dispatcher.cloud.mail.ru/u"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 SYNC_JSONBLOB_URL = os.environ.get(
     "SYNC_JSONBLOB_URL",
-    "https://jsonblob.com/api/jsonBlob/019fe5c6-3cd6-7367-bef1-fb8c1176d2de",
+    "https://jsonblob.com/api/jsonBlob/019feb16-6d24-72ab-b499-2061010d7d17",
 ).strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "Ludecani/tz-map-bothost").strip()
 
